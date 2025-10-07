@@ -1,0 +1,5 @@
+openai
+pyautogui
+pillow
+base64
+mcp[cli]
