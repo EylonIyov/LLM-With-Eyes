@@ -2,13 +2,10 @@
 MCP Server for Mouse and Keyboard Control using PyAutoGUI
 This server exposes tools for controlling mouse and keyboard through MCP.
 """
-
+import os
 import asyncio
 from mcp.server.fastmcp import FastMCP
 import pyautogui as pygui
-
-import uvicorn
-
 
 # Initialize FastMCP server
 mcp = FastMCP("mouse-keyboard-control")
@@ -195,13 +192,10 @@ def take_screenshot(filename: str = "screenshot.png") -> str:
 
 
 def main():
-    """Run the MCP server over HTTP/SSE."""
-    print("Starting MCP Mouse & Keyboard Control Server on http://127.0.0.1:9999/mcp ...")
-    uvicorn.run(
-        mcp.app,           # FastMCP exposes an ASGI app
-        host="127.0.0.1",
-        port=9999,
-    )
+    """Run the MCP server."""
+    os.environ['MCP_SERVER_PORT'] = '8000'
+    mcp.run(transport='sse')
+    print("MCP Mouse and Keyboard Control Server is running on port 8000...")
 
 if __name__ == "__main__":
     main()

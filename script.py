@@ -5,6 +5,7 @@ import base64
 from PIL import ImageGrab as ImageGrab
 
 
+
 def encode_image_to_base64(image_path):
     """Encode an image file to base64 string."""
     with open(image_path, "rb") as image_file:
@@ -81,6 +82,7 @@ def send_screenshot_to_model(count_id = 0, prompt="Describe the image"):
     
     
 def let_qwen_use_tools():
+    client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
     resp = client.responses.create(
     model="qwen/qwen2.5-vl-7b",  # or whichever ID /v1/models returns
     input="Move the mouse 30px to the right, then click once.",
@@ -107,3 +109,4 @@ if __name__ == "__main__":
         let_qwen_use_tools()
 
 
+## Learn how to make the LLM use tools like mouse and keyboard to interact with the screen, by using the MCP API.
