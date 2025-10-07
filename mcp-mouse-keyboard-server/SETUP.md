@@ -23,9 +23,8 @@ A fully functional MCP server that exposes **17 tools** for controlling your mou
 ```json
 {
   "mcpServers": {
-    "mouse-keyboard": {
-      "command": "C:\\Users\\user\\Desktop\\dev\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\Users\\user\\Desktop\\dev\\mcp-mouse-keyboard-server\\server.py"]
+    "mouse-keyboard-control": {
+      "url": "http://localhost:8000/sse"
     }
   }
 }
