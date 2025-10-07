@@ -1,9 +1,79 @@
 from openai import OpenAI
 import pyautogui as pygui
 import base64
+import requests, json
 
 from PIL import ImageGrab as ImageGrab
 
+def invoke_mouse_keyboard(instruction):
+    """
+    Executes the LM Studio MCP command to control the mouse.
+    
+    Args:
+        instruction (str): Natural language instruction for moving the mouse
+                          Example: "Move the mouse to the middle of the screen"
+                                  "Move mouse to coordinates 100, 200"
+                                  "Move cursor to top-left corner"
+    
+    Returns:
+        dict: Response from LM Studio
+        
+    Example:
+        >>> invoke_move_mouse("Move the mouse to the middle of the screen")
+        >>> invoke_move_mouse("Move mouse to x=500, y=300")
+    """
+    
+    # LM Studio endpoint
+    url = "http://127.0.0.1:1234/v1/responses"
+    
+    # Headers
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer lm-studio"
+    }
+    
+    # Request payload - matches your curl command exactly
+    payload = {
+        "model": "qwen/qwen2.5-vl-7b",
+        "tools": [{
+            "type": "mcp",
+            "server_label": "mouse-keyboard-control",
+            "server_url": "http://localhost:8000/sse",
+            "allowed_tools": ["get_mouse_position",
+                                "move_mouse",
+                                "move_mouse_relative",
+                                "click_mouse",
+                                "double_click",
+                                "right_click",
+                                "drag_mouse",
+                                "scroll_mouse",
+                                "type_text",
+                                "press_key",
+                                "press_hotkey",
+                                "hold_key",
+                                "release_key",
+                                "get_screen_size",
+                                "take_screenshot"]
+        }],
+        "input": instruction
+    }
+    
+    # Make the request
+    response = requests.post(url, headers=headers, json=payload)
+    
+    # Return the JSON response
+    return response.json()
+
+
+
+def example_middle_screen():
+    """
+    Example 1: Move mouse to middle of screen (same as your curl command)
+    """
+    print("=== Example 1: Move to middle of screen ===")
+    result = invoke_mouse_keyboard("Move the mouse to the middle of the screen")
+    print(json.dumps(result, indent=2))
+    print()
 
 
 def encode_image_to_base64(image_path):
@@ -30,7 +100,7 @@ def health_function():
     
 def promot_model(prompt):
     """A simple health check function to verify API connectivity. """
-    client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
+    client = OpenAI(base_url="http://localhost:1234/v1/responses", api_key="lm-studio")
     resp = client.chat.completions.create(
         model="qwen/qwen2.5-vl-7b",
         messages=[{
@@ -80,33 +150,13 @@ def send_screenshot_to_model(count_id = 0, prompt="Describe the image"):
     # Print the model's response
     print(resp.choices[0].message.content)
     
-    
-def let_qwen_use_tools():
-    client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
-    resp = client.responses.create(
-    model="qwen/qwen2.5-vl-7b",  # or whichever ID /v1/models returns
-    input="Move the mouse 30px to the right, then click once.",
-    tools=[{
-        "type": "mcp",
-        "server_label": "mouse-keyboard",             # must match mcp.json key
-        "server_url": "http://127.0.0.1:9999/mcp",    # explicit is safest
-        "allowed_tools": [
-            "get_mouse_position","move_mouse","move_mouse_relative",
-            "click_mouse","double_click","right_click","drag_mouse","scroll_mouse",
-            "type_text","press_key","press_hotkey","hold_key","release_key",
-            "get_screen_size","take_screenshot"
-        ]
-    }],
-    tool_choice="auto"
-    )
 
-    print(resp.output_text)
 
     
     
 if __name__ == "__main__":
-        pygui.sleep(5)
-        let_qwen_use_tools()
-
+    prompt =input("Enter your prompt: ")
+    invoke_mouse_keyboard(prompt)
 
 ## Learn how to make the LLM use tools like mouse and keyboard to interact with the screen, by using the MCP API.
+
