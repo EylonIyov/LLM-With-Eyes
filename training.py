@@ -362,14 +362,18 @@ NOW YOUR TASK:
 Screen resolution: {screen_width}x{screen_height}
 Task: Find {target_description}
 
-CRITICAL GUIDELINES:
-- Taskbar is at y ≈ {screen_height - 30} to {screen_height} (BOTTOM of screen)
-- Desktop icons are typically at x < 200, y: 50 to {screen_height - 100} (LEFT side)
-- Window title bars are at y < 50 (TOP of screen)
-- System tray is at x > {screen_width - 200}, y > {screen_height - 50} (BOTTOM-RIGHT corner)
-- Pay CLOSE attention to icon appearance and exact position
-- Center your coordinates on the middle of the element
-- Look at the ENTIRE screenshot carefully before answering
+INSTRUCTIONS:
+1. Scan the ENTIRE screenshot carefully
+2. Look for ANY element that matches "{target_description}" - it could be ANYWHERE on screen
+3. Common locations (but not limited to):
+   - Taskbar icons: usually near bottom (y ≈ {screen_height - 30})
+   - Desktop icons: usually on left side (x < 300)
+   - Window controls: usually at top (y < 50)
+   - But the element could be in a window, dialog box, or anywhere else!
+4. When you find it, give the CENTER coordinates of that element
+5. If you don't see it anywhere on the screenshot, only then say target_found: false
+
+IMPORTANT: Don't limit your search to specific areas. Look everywhere on the screen.
 
 Respond in JSON format:
 {{
@@ -377,7 +381,7 @@ Respond in JSON format:
     "description": "what you see at that location",
     "x": coordinate,
     "y": coordinate,
-    "reasoning": "detailed explanation mentioning which screen area (top/bottom/left/right/center)",
+    "reasoning": "where you found it and why you're confident it matches",
     "confidence": "high/medium/low"
 }}"""
     
