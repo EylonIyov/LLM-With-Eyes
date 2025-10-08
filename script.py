@@ -5,7 +5,7 @@ import requests, json
 
 from PIL import ImageGrab as ImageGrab
 
-def invoke_mouse_keyboard(instruction):
+def invoke_mouse_keyboard(model_name = "qwen/qwen2.5-vl-7b" , instruction = "Move the mouse to the middle of the screen"):
     """
     Executes the LM Studio MCP command to control the mouse.
     
@@ -34,7 +34,7 @@ def invoke_mouse_keyboard(instruction):
     
     # Request payload - matches your curl command exactly
     payload = {
-        "model": "qwen/qwen2.5-vl-7b",
+        "model": model_name,
         "tools": [{
             "type": "mcp",
             "server_label": "mouse-keyboard-control",
@@ -71,7 +71,7 @@ def example_middle_screen():
     Example 1: Move mouse to middle of screen (same as your curl command)
     """
     print("=== Example 1: Move to middle of screen ===")
-    result = invoke_mouse_keyboard("Move the mouse to the middle of the screen")
+    result = invoke_mouse_keyboard("qwen/qwen2.5-vl-7b","Move the mouse to the middle of the screen")
     print(json.dumps(result, indent=2))
     print()
 
@@ -102,7 +102,7 @@ def promot_model(prompt):
     """A simple health check function to verify API connectivity. """
     client = OpenAI(base_url="http://localhost:1234/v1/responses", api_key="lm-studio")
     resp = client.chat.completions.create(
-        model="qwen/qwen2.5-vl-7b",
+        model="openai/gpt-oss-20b",
         messages=[{
             "role": "user",
     "content":[
@@ -155,8 +155,9 @@ def send_screenshot_to_model(count_id = 0, prompt="Describe the image"):
     
     
 if __name__ == "__main__":
-    prompt =input("Enter your prompt: ")
-    invoke_mouse_keyboard(prompt)
-
+    example_middle_screen()
+    #invoke_mouse_keyboard(prompt)
+    
+    
 ## Learn how to make the LLM use tools like mouse and keyboard to interact with the screen, by using the MCP API.
 

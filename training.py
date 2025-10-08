@@ -9,6 +9,7 @@ import json
 import re
 import time
 import requests
+import os
 
 # Import functions from script.py
 from script import (
@@ -16,6 +17,75 @@ from script import (
     capture_screenshot,
     encode_image_to_base64
 )
+
+# Import advanced prompting techniques
+from advanced_prompts import create_few_shot_prompt, create_region_prompt
+
+
+# Load training examples if available
+def load_training_examples():
+    """Load existing training data to use as few-shot examples"""
+    if os.path.exists("training_dataset.json"):
+        with open("training_dataset.json", 'r') as f:
+            return json.load(f)
+    return []
+
+
+def save_training_example(description, screenshot_path, correct_x, correct_y, model_prediction=None):
+    """
+    Save a training example to the dataset
+    
+    Args:
+        description: What element was being found
+        screenshot_path: Path to the screenshot
+        correct_x, correct_y: Correct coordinates
+        model_prediction: Tuple of (x, y) that model predicted (optional)
+    """
+    # Load existing data
+    training_data = load_training_examples()
+    
+    # Get base64 of screenshot
+    base64_image = encode_image_to_base64(screenshot_path)
+    
+    # Create new example
+    new_example = {
+        "id": len(training_data),
+        "description": description,
+        "screenshot_path": screenshot_path,
+        "screenshot_base64": base64_image,
+        "x": correct_x,
+        "y": correct_y,
+        "screen_resolution": {
+            "width": pygui.size()[0],
+            "height": pygui.size()[1]
+        },
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    if model_prediction:
+        new_example["model_prediction"] = {
+            "x": model_prediction[0],
+            "y": model_prediction[1],
+            "error_x": abs(model_prediction[0] - correct_x),
+            "error_y": abs(model_prediction[1] - correct_y)
+        }
+    
+    # Append and save
+    training_data.append(new_example)
+    
+    with open("training_dataset.json", 'w') as f:
+        json.dump(training_data, indent=2, fp=f)
+    
+    # Reload global examples
+    global TRAINING_EXAMPLES
+    TRAINING_EXAMPLES = training_data
+    
+    print(f"   💾 Saved to training_dataset.json (now contains {len(training_data)} examples)")
+
+
+TRAINING_EXAMPLES = load_training_examples()
+if TRAINING_EXAMPLES:
+    print(f"✓ Loaded {len(TRAINING_EXAMPLES)} training examples for few-shot learning")
 
 
 def train_move_to_location(target_description, x_coord=None, y_coord=None, count_id=0):
@@ -255,26 +325,59 @@ def test_find_and_click(target_description, click_type="left", count_id=0, verif
     image_path = capture_screenshot(count_id)
     base64_image = encode_image_to_base64(image_path)
     
-    # Step 2: Ask model to find the element
+    # Step 2: Build advanced prompt with few-shot examples
     screen_width, screen_height = pygui.size()
-    prompt = f"""Look at this screenshot and find {target_description}.
+    
+    print("💡 Using few-shot prompting with training examples")
+    
+    # Build few-shot examples from training data
+    few_shot_examples = ""
+    if TRAINING_EXAMPLES:
+        examples_to_use = TRAINING_EXAMPLES[:3]  # Use up to 3 examples
+        for i, ex in enumerate(examples_to_use, 1):
+            few_shot_examples += f"""
+EXAMPLE {i}:
+Task: Find "{ex['description']}"
+Answer: {{"target_found": true, "x": {ex['x']}, "y": {ex['y']}, "reasoning": "Located at the specified position"}}
+"""
+    else:
+        # Default examples if no training data
+        few_shot_examples = f"""
+EXAMPLE 1:
+Task: Find "the Start button"
+Answer: {{"target_found": true, "x": 25, "y": {screen_height - 20}, "reasoning": "Windows Start button is at bottom-left corner of taskbar"}}
 
-IMPORTANT CONTEXT:
-- Screen resolution: {screen_width}x{screen_height}
-- The Windows taskbar is typically at the BOTTOM of the screen (y coordinate close to {screen_height})
-- Desktop icons are usually on the left side
-- Application windows are in the center
+EXAMPLE 2:
+Task: Find "the Chrome icon in taskbar"
+Answer: {{"target_found": true, "x": 670, "y": {screen_height - 20}, "reasoning": "Chrome icon is in the taskbar at the bottom"}}
 
-Analyze the image VERY carefully and tell me the exact X,Y coordinates where I should click.
-Pay special attention to the actual location of the element you're identifying.
+EXAMPLE 3:
+Task: Find "the File Explorer icon"
+Answer: {{"target_found": true, "x": 550, "y": {screen_height - 20}, "reasoning": "File Explorer icon is in the taskbar at the bottom"}}
+"""
+    
+    prompt = f"""You are an expert at identifying UI elements in screenshots.
+{few_shot_examples}
+NOW YOUR TASK:
+Screen resolution: {screen_width}x{screen_height}
+Task: Find {target_description}
 
-Respond in JSON format like this:
+CRITICAL GUIDELINES:
+- Taskbar is at y ≈ {screen_height - 30} to {screen_height} (BOTTOM of screen)
+- Desktop icons are typically at x < 200, y: 50 to {screen_height - 100} (LEFT side)
+- Window title bars are at y < 50 (TOP of screen)
+- System tray is at x > {screen_width - 200}, y > {screen_height - 50} (BOTTOM-RIGHT corner)
+- Pay CLOSE attention to icon appearance and exact position
+- Center your coordinates on the middle of the element
+- Look at the ENTIRE screenshot carefully before answering
+
+Respond in JSON format:
 {{
     "target_found": true/false,
     "description": "what you see at that location",
     "x": coordinate,
     "y": coordinate,
-    "reasoning": "why these coordinates (mention which part of screen: top/bottom/left/right)",
+    "reasoning": "detailed explanation mentioning which screen area (top/bottom/left/right/center)",
     "confidence": "high/medium/low"
 }}"""
     
@@ -365,15 +468,60 @@ Respond in JSON format like this:
     move_result = invoke_mouse_keyboard(instruction=move_instruction)
     time.sleep(0.5)  # Brief pause after moving
     
-    # Step 4.5: Optional verification
+    # Step 4.5: Optional verification with learning
     click_result = None
     if verify_before_click:
         print("\n⚠️  Mouse is now at the target location.")
         print("   Look at your screen - is the mouse pointing at the correct element?")
-        confirm = input("   Proceed with click? (y/n): ").strip().lower()
+        confirm = input("   Proceed with click? (y/n/correct): ").strip().lower()
         
-        if confirm != 'y':
+        if confirm == 'correct':
+            # User wants to provide correct coordinates
+            print("\n📝 Let's record the correct coordinates for training...")
+            print("   Move your mouse to the CORRECT location and press Enter")
+            input("   Press Enter when ready...")
+            correct_x, correct_y = pygui.position()
+            
+            # Save as training example
+            save_training_example(
+                description=target_description,
+                screenshot_path=image_path,
+                correct_x=correct_x,
+                correct_y=correct_y,
+                model_prediction=(target_x, target_y)
+            )
+            
+            print(f"\n✅ Training example saved! Correct: ({correct_x}, {correct_y}), Model predicted: ({target_x}, {target_y})")
+            print("   This will help improve future predictions.")
+            
+            # Update coordinates to correct ones
+            target_x, target_y = correct_x, correct_y
+            
+            # Move to correct location
+            print(f"\n🖱️  Moving to correct location ({target_x}, {target_y})...")
+            move_instruction = f"Move the mouse to coordinates x={target_x}, y={target_y}"
+            move_result = invoke_mouse_keyboard(instruction=move_instruction)
+            time.sleep(0.5)
+            
+        elif confirm != 'y':
             print("\n🚫 Click cancelled by user")
+            
+            # Ask if they want to provide correct coordinates
+            save_correct = input("   Save correct coordinates for training? (y/n): ").strip().lower()
+            if save_correct == 'y':
+                print("   Move your mouse to the CORRECT location and press Enter")
+                input("   Press Enter when ready...")
+                correct_x, correct_y = pygui.position()
+                
+                save_training_example(
+                    description=target_description,
+                    screenshot_path=image_path,
+                    correct_x=correct_x,
+                    correct_y=correct_y,
+                    model_prediction=(target_x, target_y)
+                )
+                print(f"   ✅ Training example saved!")
+            
             return {
                 "success": False,
                 "reason": "user_cancelled",
@@ -412,14 +560,24 @@ Respond in JSON format like this:
 
 if __name__ == "__main__":
     print("🚀 Vision-Based Mouse Control Training\n")
+    
+    # Show quick wins status
+    print("📊 Quick Wins Status:")
+    print(f"   ✓ Few-shot prompting: {'ENABLED' if TRAINING_EXAMPLES else 'ENABLED (using defaults)'}")
+    print(f"   ✓ Region-based hints: ENABLED")
+    print(f"   ✓ Verification mode: ENABLED")
+    print(f"   ✓ Training data: {len(TRAINING_EXAMPLES)} examples loaded")
+    print()
+    
     print("Choose a training mode:")
     print("1. Predefined training dataset")
     print("2. Interactive training")
     print("3. Single supervised example")
     print("4. Find element without ground truth")
-    print("5. Test: Find and click an element\n")
+    print("5. Test: Find and click an element")
+    print("6. View training statistics\n")
     
-    choice = input("Enter choice (1-5): ").strip()
+    choice = input("Enter choice (1-6): ").strip()
     
     if choice == "1":
         print("\nRunning predefined training dataset...")
@@ -461,8 +619,47 @@ if __name__ == "__main__":
         
         if result["success"]:
             print("\n🎉 Test completed successfully!")
+            
+            # Ask if it was accurate
+            accurate = input("\nWas the click accurate? (y/n): ").strip().lower()
+            if accurate == 'y':
+                # Save as positive training example
+                current_x, current_y = pygui.position()
+                save_training_example(
+                    description=description,
+                    screenshot_path=f"screenshot_pygui_0.png",
+                    correct_x=current_x,
+                    correct_y=current_y
+                )
+                print("✅ Saved as training example!")
         else:
             print(f"\n❌ Test failed: {result.get('reason', 'unknown')}")
+    
+    elif choice == "6":
+        print("\n📊 Training Statistics")
+        print("=" * 60)
+        if not TRAINING_EXAMPLES:
+            print("No training data collected yet.")
+            print("\nRun option 5 and save corrections to build your dataset!")
+        else:
+            print(f"Total examples: {len(TRAINING_EXAMPLES)}")
+            print(f"\nExamples:")
+            for ex in TRAINING_EXAMPLES[:10]:  # Show first 10
+                print(f"  • {ex['description']}: ({ex['x']}, {ex['y']})")
+                if 'model_prediction' in ex:
+                    error = ex['model_prediction']
+                    print(f"    Error: X±{error['error_x']}, Y±{error['error_y']}")
+            
+            if len(TRAINING_EXAMPLES) > 10:
+                print(f"  ... and {len(TRAINING_EXAMPLES) - 10} more")
+            
+            # Calculate average error if available
+            errors = [ex.get('model_prediction', {}) for ex in TRAINING_EXAMPLES]
+            errors = [e for e in errors if e]
+            if errors:
+                avg_error_x = sum(e['error_x'] for e in errors) / len(errors)
+                avg_error_y = sum(e['error_y'] for e in errors) / len(errors)
+                print(f"\nAverage error: X±{avg_error_x:.1f}px, Y±{avg_error_y:.1f}px")
     
     else:
         print("Invalid choice. Running default example...")
