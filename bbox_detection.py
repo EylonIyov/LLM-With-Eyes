@@ -122,31 +122,38 @@ def detect_ui_elements(image_path, min_area=400, max_area=None, min_width=15, mi
     
     # Method 2: Color-based detection (for solid colored elements like game boxes)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    
-    # Detect blue elements
-    lower_blue = np.array([100, 100, 100])
-    upper_blue = np.array([130, 255, 255])
+
+    # Broader, darker-tolerant blue; keep green and red
+    lower_blue = np.array([90, 60, 30])
+    upper_blue = np.array([140, 255, 255])
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
-    
-    # Detect green elements
+
     lower_green = np.array([40, 40, 40])
-    upper_green = np.array([80, 255, 255])
+    upper_green = np.array([90, 255, 255])
     mask_green = cv2.inRange(hsv, lower_green, upper_green)
-    
-    # Detect red elements (red wraps around hue spectrum)
-    lower_red1 = np.array([0, 100, 100])
+
+    lower_red1 = np.array([0, 80, 40])
     upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 100, 100])
+    lower_red2 = np.array([170, 80, 40])
     upper_red2 = np.array([180, 255, 255])
     mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
     mask_red = cv2.bitwise_or(mask_red1, mask_red2)
-    
+
+    # Morphological cleanup to stabilize rounded shapes
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_CLOSE, kernel, iterations=2)
+
     # Combine all color masks
     color_mask = cv2.bitwise_or(mask_blue, cv2.bitwise_or(mask_green, mask_red))
-    
-    # Find contours from color detection
-    contours_color, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Find contours from color detection (use RETR_TREE to keep internal shapes)
+    contours_color, _ = cv2.findContours(color_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     color_elements = 0
     filtered_by_size = 0
     for contour in contours_color:
@@ -167,8 +174,8 @@ def detect_ui_elements(image_path, min_area=400, max_area=None, min_width=15, mi
     
     print(f"   Color-based detection: {color_elements} elements (filtered {filtered_by_size} too small)")
     
-    # Method 3: Find contours from edges
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Method 3: Find contours from edges (keep internal shapes)
+    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
     edge_elements = 0
     edge_filtered_by_size = 0
@@ -209,7 +216,7 @@ def detect_ui_elements(image_path, min_area=400, max_area=None, min_width=15, mi
     return elements
 
 
-def remove_overlapping_boxes(boxes, iou_threshold=0.5):
+def remove_overlapping_boxes(boxes, iou_threshold=0.5, preserve_nested=True, container_drop_ratio=0.85):
     """
     Remove overlapping bounding boxes using Non-Maximum Suppression.
     
@@ -261,13 +268,36 @@ def remove_overlapping_boxes(boxes, iou_threshold=0.5):
         # Calculate IoU
         iou = intersection / union
         
-        # Keep boxes with low IoU (not overlapping much)
-        indices = indices[1:][iou < iou_threshold]
+        # Determine which to keep based on IoU and containment
+        remaining = []
+        for idx, j in enumerate(indices[1:]):
+            other = boxes_array[j, :4]
+            # Check containment (preserve nested small boxes inside large ones)
+            if preserve_nested:
+                if (other[0] >= current_box[0] and other[1] >= current_box[1] and
+                    other[2] <= current_box[2] and other[3] <= current_box[3]):
+                    remaining.append(j)  # keep nested
+                    continue
+            if iou[idx] < iou_threshold:
+                remaining.append(j)
+        indices = np.array(remaining, dtype=int)
     
-    # Convert back to original format
+    # Convert back to original format and drop giant containers
     result = []
+    if len(boxes_array) > 0:
+        # screen-like reference from boxes extents (best-effort)
+        xs1 = boxes_array[:, 0]; ys1 = boxes_array[:, 1]
+        xs2 = boxes_array[:, 2]; ys2 = boxes_array[:, 3]
+        W = max(xs2) - min(xs1)
+        H = max(ys2) - min(ys1)
+        screen_area_est = max(1, W * H)
+    else:
+        screen_area_est = 1
     for idx in keep:
-        x1, y1, x2, y2, _ = boxes_array[idx]
+        x1, y1, x2, y2, a = boxes_array[idx]
+        if (x2 - x1) * (y2 - y1) >= container_drop_ratio * screen_area_est:
+            # skip giant container
+            continue
         result.append((int(x1), int(y1), int(x2 - x1), int(y2 - y1)))
     
     return result
