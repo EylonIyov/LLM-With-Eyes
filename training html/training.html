@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Click the Green Box - Training Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            text-align: center;
+            color: white;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions {
+            font-size: 1.2rem;
+            margin-bottom: 20px;
+            opacity: 0.9;
+        }
+
+        .scoreboard {
+            display: flex;
+            gap: 40px;
+            justify-content: center;
+            margin-bottom: 30px;
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+
+        .score-item {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 15px 30px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .good-score {
+            color: #00ff88;
+            text-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
+        }
+
+        .bad-score {
+            color: #ff4444;
+            text-shadow: 0 0 10px rgba(255, 68, 68, 0.5);
+        }
+
+        #gameArea {
+            width: 800px;
+            height: 600px;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            position: relative;
+            overflow: hidden;
+            cursor: crosshair;
+        }
+
+        .box {
+            position: absolute;
+            border-radius: 25px;
+            transition: all 0.1s ease;
+        }
+
+        .green-box {
+            background: #0923cd;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+        }
+
+        .red-box {
+            background: #f44336;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+        }
+
+        .feedback {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 4rem;
+            font-weight: bold;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+            text-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+        }
+
+        .feedback.show {
+            opacity: 1;
+        }
+
+        .feedback.correct {
+            color: #00ff88;
+        }
+
+        .feedback.wrong {
+            color: #ff4444;
+        }
+
+        .buttons {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+        }
+
+        button {
+            padding: 12px 30px;
+            font-size: 1.1rem;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: bold;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        .start-btn {
+            background: #00ff88;
+            color: #1a1a2e;
+        }
+
+        .reset-btn {
+            background: #ff4444;
+            color: white;
+        }
+
+        .difficulty-btn {
+            background: #4488ff;
+            color: white;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        .box:hover {
+            animation: pulse 0.5s ease-in-out;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 Click the Green Box!</h1>
+        <p class="instructions">Click only the GREEN boxes. Avoid the RED boxes!</p>
+        
+        <div class="scoreboard">
+            <div class="score-item">
+                <div>Good Clicks</div>
+                <div class="good-score" id="goodScore">0</div>
+            </div>
+            <div class="score-item">
+                <div>Wrong Clicks</div>
+                <div class="bad-score" id="badScore">0</div>
+            </div>
+        </div>
+
+        <div id="gameArea"></div>
+
+        <div class="buttons">
+            <button class="start-btn" onclick="startGame()">Start Game</button>
+            <button class="reset-btn" onclick="resetGame()">Reset Score</button>
+            <button class="difficulty-btn" onclick="changeDifficulty()">Difficulty: <span id="difficultyLevel">Easy</span></button>
+        </div>
+    </div>
+
+    <div class="feedback" id="feedback"></div>
+
+    <script>
+        let goodClicks = 0;
+        let badClicks = 0;
+        let gameActive = false;
+        let difficulty = 'easy'; // easy, medium, hard
+        let spawnInterval;
+
+        const gameArea = document.getElementById('gameArea');
+        const goodScoreEl = document.getElementById('goodScore');
+        const badScoreEl = document.getElementById('badScore');
+        const feedbackEl = document.getElementById('feedback');
+        const difficultyLevelEl = document.getElementById('difficultyLevel');
+
+        const difficulties = {
+            easy: { greenChance: 0.7, spawnRate: 1500, maxBoxes: 2 },
+            medium: { greenChance: 0.5, spawnRate: 1000, maxBoxes: 2 },
+            hard: { greenChance: 0.3, spawnRate: 800, maxBoxes: 2 }
+        };
+
+        function startGame() {
+            if (gameActive) return;
+            gameActive = true;
+            
+            // Clear any existing boxes
+            gameArea.innerHTML = '';
+            
+            // Start spawning boxes
+            spawnInterval = setInterval(spawnBox, difficulties[difficulty].spawnRate);
+            
+            // Spawn initial box
+            spawnBox();
+        }
+
+        function stopGame() {
+            gameActive = false;
+            clearInterval(spawnInterval);
+        }
+
+        function resetGame() {
+            stopGame();
+            goodClicks = 0;
+            badClicks = 0;
+            updateScores();
+            gameArea.innerHTML = '';
+        }
+
+        function changeDifficulty() {
+            const levels = ['easy', 'medium', 'hard'];
+            const currentIndex = levels.indexOf(difficulty);
+            difficulty = levels[(currentIndex + 1) % levels.length];
+            difficultyLevelEl.textContent = difficulty.charAt(0).toUpperCase() + difficulty.slice(1);
+            
+            if (gameActive) {
+                stopGame();
+                startGame();
+            }
+        }
+
+        function spawnBox() {
+            // Check if there's already one box of each color
+            const currentBoxes = Array.from(gameArea.children);
+            const hasGreen = currentBoxes.some(box => box.dataset.type === 'green');
+            const hasRed = currentBoxes.some(box => box.dataset.type === 'red');
+            
+            // Only spawn if we don't have both colors
+            if (hasGreen && hasRed) {
+                return;
+            }
+
+            const box = document.createElement('div');
+            box.className = 'box';
+            
+            // Green box is bigger (80-100px diameter)
+            // Red boxes are smaller (30-50px diameter)
+            let size;
+            let boxType;
+            
+            // Determine which color to spawn
+            const availableColors = [];
+            if (!hasGreen) availableColors.push('green');
+            if (!hasRed) availableColors.push('red');
+            
+            // Pick random available color
+            boxType = availableColors[Math.floor(Math.random() * availableColors.length)];
+            
+            if (boxType === 'green') {
+                size = Math.random() * 20 + 80; // 80-100px (bigger!)
+                box.classList.add('green-box');
+                box.dataset.type = 'green';
+            } else {
+                size = Math.random() * 20 + 30; // 30-50px
+                box.classList.add('red-box');
+                box.dataset.type = 'red';
+            }
+            
+            box.style.width = size + 'px';
+            box.style.height = size + 'px';
+            
+            // Random position (keep within bounds)
+            const maxX = gameArea.offsetWidth - size;
+            const maxY = gameArea.offsetHeight - size;
+            const x = Math.random() * maxX;
+            const y = Math.random() * maxY;
+            box.style.left = x + 'px';
+            box.style.top = y + 'px';
+            
+            // Add click handler
+            box.addEventListener('click', handleBoxClick);
+            
+            // Add to game area
+            gameArea.appendChild(box);
+            
+            // Boxes stay forever (no auto-removal)
+            // They only disappear when clicked
+        }
+
+        function handleBoxClick(event) {
+            event.stopPropagation();
+            const box = event.target;
+            const type = box.dataset.type;
+            
+            if (type === 'green') {
+                goodClicks++;
+                showFeedback('✓ Correct!', true);
+            } else {
+                badClicks++;
+                showFeedback('✗ Wrong!', false);
+            }
+            
+            updateScores();
+            box.remove();
+        }
+
+        function updateScores() {
+            goodScoreEl.textContent = goodClicks;
+            badScoreEl.textContent = badClicks;
+        }
+
+        function showFeedback(text, isCorrect) {
+            feedbackEl.textContent = text;
+            feedbackEl.className = 'feedback show ' + (isCorrect ? 'correct' : 'wrong');
+            
+            setTimeout(() => {
+                feedbackEl.classList.remove('show');
+            }, 500);
+        }
+
+        // Click on background counts as wrong click
+        gameArea.addEventListener('click', function(event) {
+            if (event.target === gameArea && gameActive) {
+                badClicks++;
+                updateScores();
+                showFeedback('✗ Missed!', false);
+            }
+        });
+
+        // Initialize
+        updateScores();
+    </script>
+</body>
+</html>

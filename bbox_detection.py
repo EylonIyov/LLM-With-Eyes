@@ -13,9 +13,10 @@ import numpy as np
 from script import encode_image_to_base64
 import base64
 import json
-from openai import OpenAI
 import re
 import time
+from openai import OpenAI
+import os
 
 # Optional OCR (graceful fallback if not installed)
 try:
@@ -24,6 +25,73 @@ try:
 except Exception:
     pytesseract = None
     OCR_AVAILABLE = False
+
+# Configure pytesseract to point at the Tesseract binary on Windows if available
+if OCR_AVAILABLE:
+    try:
+        import os, shutil
+        # Priority: environment variables, then PATH, then common install paths
+        candidate = os.getenv('TESSERACT_CMD') or os.getenv('TESSERACT_PATH')
+        if not candidate or not os.path.exists(candidate):
+            candidate = shutil.which('tesseract')
+        if not candidate or not os.path.exists(candidate):
+            for p in (
+                r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+                r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
+            ):
+                if os.path.exists(p):
+                    candidate = p
+                    break
+        if candidate and os.path.exists(candidate):
+            pytesseract.pytesseract.tesseract_cmd = candidate
+    except Exception:
+        # Leave default configuration; OCR calls will fail gracefully if missing
+        pass
+
+
+def _load_env_if_needed():
+    """Load .env file if OPENAI_API_KEY not present in environment."""
+    if os.environ.get("OPENAI_API_KEY"):
+        return
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    try:
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if '=' in line:
+                        k, v = line.split('=', 1)
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if k and (k not in os.environ):
+                            os.environ[k] = v
+    except Exception:
+        pass
+
+def _move_via_mcp_tools(x: int, y: int, click: bool, duration: float = 1.0) -> bool:
+    """Attempt to move/click using the MCP server's tool functions by importing its module.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Dynamically load the MCP server module without static import
+        import importlib.util
+        module_path = os.path.join(os.path.dirname(__file__), 'mcp-mouse-keyboard-server', 'server.py')
+        spec = importlib.util.spec_from_file_location('mcp_mouse_server', module_path)
+        if not spec or not spec.loader:
+            return False
+        mcp_mouse_server = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mcp_mouse_server)  # type: ignore[attr-defined]
+        # Use exposed tool functions (decorated but callable directly)
+        if not hasattr(mcp_mouse_server, 'move_mouse'):
+            return False
+        mcp_mouse_server.move_mouse(int(x), int(y), duration=float(duration))
+        if click and hasattr(mcp_mouse_server, 'click_mouse'):
+            mcp_mouse_server.click_mouse(button="left", clicks=1)
+        return True
+    except Exception:
+        return False
 
 
 def _preprocess_for_ocr(pil_image: Image.Image) -> Image.Image:
@@ -581,19 +649,76 @@ def test_bbox_detection(target_description, count_id=0, auto_detect=True, click=
                 crop_up = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
                 crop_path = screenshot_path.replace('.png', '_crop2x.png')
                 crop_up.save(crop_path)
+
+                # Also draw the same numbered bounding boxes on the upscaled crop
+                try:
+                    annot = crop_up.copy()
+                    draw_c = ImageDraw.Draw(annot)
+                    for idx in sorted(element_map.keys()):
+                        bx, by, bw, bh = element_map[idx]["bbox"]
+                        # Keep only boxes whose center falls inside the crop region
+                        cx, cy = element_map[idx]["center"]
+                        if not (x1 <= cx <= x2 and y1 <= cy <= y2):
+                            continue
+                        # Transform to crop-up coordinates (offset and scale 2x)
+                        tx = int((bx - x1) * 2)
+                        ty = int((by - y1) * 2)
+                        tw = int(bw * 2)
+                        th = int(bh * 2)
+
+                        # Draw box
+                        box_color = (0, 255, 0)
+                        thickness = max(2, min(tw, th) // 30)
+                        draw_c.rectangle([tx, ty, tx + tw, ty + th], outline=box_color, width=thickness)
+
+                        # Label number
+                        label = str(idx)
+                        min_dim = max(1, min(tw, th))
+                        font_size = max(16, min(64, int(min_dim * 0.45)))
+                        try:
+                            font_c = ImageFont.truetype("arial.ttf", font_size)
+                        except Exception:
+                            font_c = ImageFont.load_default()
+                        try:
+                            bb = draw_c.textbbox((0, 0), label, font=font_c)
+                            twd = bb[2] - bb[0]
+                            thd = bb[3] - bb[1]
+                        except Exception:
+                            twd = len(label) * (font_size // 2)
+                            thd = font_size
+                        padding = max(3, font_size // 8)
+                        lx = tx + thickness + 2
+                        ly = ty + thickness + 2
+                        draw_c.rectangle([lx, ly, lx + twd + padding * 2, ly + thd + padding * 2],
+                                         fill=(255, 255, 255), outline=(0, 0, 0), width=max(1, thickness // 2))
+                        draw_c.text((lx + padding, ly + padding), label, fill=(0, 0, 0), font=font_c)
+
+                    crop_path_bbox = screenshot_path.replace('.png', '_crop2x_bbox.png')
+                    annot.save(crop_path_bbox)
+                except Exception:
+                    crop_path_bbox = None
             else:
                 crop_path = None
+                crop_path_bbox = None
         else:
             crop_path = None
+            crop_path_bbox = None
     except Exception:
         crop_path = None
+        crop_path_bbox = None
     
     # Encode annotated image
     with open(bbox_path, "rb") as img_file:
         base64_image = base64.b64encode(img_file.read()).decode('utf-8')
     # Optionally encode the 2x crop
     base64_crop = None
-    if crop_path:
+    if crop_path_bbox:
+        try:
+            with open(crop_path_bbox, "rb") as cimg:
+                base64_crop = base64.b64encode(cimg.read()).decode('utf-8')
+        except Exception:
+            base64_crop = None
+    elif crop_path:
         try:
             with open(crop_path, "rb") as cimg:
                 base64_crop = base64.b64encode(cimg.read()).decode('utf-8')
@@ -606,15 +731,112 @@ def test_bbox_detection(target_description, count_id=0, auto_detect=True, click=
     if not OCR_AVAILABLE:
         print("ℹ️  OCR not available (pytesseract not installed or tesseract binary missing). Proceeding without text hints.")
     
-    # Send to model
+    # Remote-first selection: try OpenAI (cloud) to pick box number
     print(f"\n🔍 Searching for: {target_description}")
+    selected_box = None
+    _load_env_if_needed()
+    remote_api_key = os.environ.get("OPENAI_API_KEY")
+    if remote_api_key:
+        try:
+            content_remote = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}},
+            ]
+            if base64_crop:
+                content_remote.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{base64_crop}"}
+                })
+
+            client_remote = OpenAI(api_key=remote_api_key)
+            resp_remote = client_remote.chat.completions.create(
+                model=os.environ.get("OPENAI_VISION_MODEL", "gpt-4o"),
+                messages=[
+                    {"role": "system", "content": "You must return STRICT JSON only."},
+                    {"role": "user", "content": content_remote}
+                ],
+                temperature=0,
+                top_p=0.1,
+                max_tokens=120,
+            )
+            remote_text = resp_remote.choices[0].message.content or ""
+            # Parse JSON
+            cleaned = remote_text.strip()
+            if cleaned.startswith('```'):
+                m = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', cleaned, re.S)
+                if m:
+                    cleaned = m.group(1).strip()
+            data = json.loads(cleaned)
+            box_number = data.get("box_number")
+            if isinstance(box_number, str) and box_number.isdigit():
+                box_number = int(box_number)
+            if isinstance(box_number, int) and box_number in element_map:
+                selected_box = box_number
+                print(f"\n🌐 Remote model selected box #{selected_box}")
+            else:
+                print(f"\n⚠️  Remote selection invalid: {box_number}")
+        except Exception as e:
+            print(f"\n⚠️  Remote selection failed: {e}")
+    else:
+        print("ℹ️  OPENAI_API_KEY not set; skipping remote selection.")
+
+    # If remote succeeded, optionally notify local LLM then move mouse
+    if isinstance(selected_box, int):
+        element = element_map[selected_box]
+        x, y = element['center']
+        bbox = element['bbox']
+
+        # Send a brief acknowledgement prompt to local LLM for traceability
+        try:
+            client_local = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
+            move_prompt = (
+                f"The remote vision model chose box {selected_box}. "
+                f"Move the mouse to its center coordinates ({x}, {y}). Respond with JSON: {{\"ack\": true}}"
+            )
+            content_local = [
+                {"type": "text", "text": move_prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}},
+            ]
+            if base64_crop:
+                content_local.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{base64_crop}"}
+                })
+            _ = client_local.chat.completions.create(
+                model="qwen/qwen2.5-vl-7b",
+                messages=[{"role": "user", "content": content_local}],
+                temperature=0,
+                top_p=0,
+                max_tokens=32,
+            )
+        except Exception:
+            # Local LM may not be running; proceed regardless
+            pass
+
+        # Move mouse via MCP server tools if available; fallback to PyAutoGUI
+        print(f"\n🖱️  Moving mouse to ({x}, {y})...")
+        if not _move_via_mcp_tools(x, y, click, duration=1.0):
+            pygui.moveTo(x, y, duration=1)
+            if click:
+                time.sleep(0.5)
+                pygui.click()
+
+        return {
+            "success": True,
+            "box_number": selected_box,
+            "x": x,
+            "y": y,
+            "bbox": bbox,
+            "via": "remote",
+        }
+
+    # Fallback: use local LLM to select box as before
     client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
     content_payload = [
         {"type": "text", "text": prompt},
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
     ]
     if base64_crop:
-        # Provide a zoomed-in crop to help 7B models with tiny digits/text
         content_payload.append({
             "type": "image_url",
             "image_url": {"url": f"data:image/png;base64,{base64_crop}"}
@@ -627,7 +849,7 @@ def test_bbox_detection(target_description, count_id=0, auto_detect=True, click=
             "content": content_payload
         }],
         temperature=0,
-        top_p=0.1
+        top_p=0
     )
     
     response_text = resp.choices[0].message.content
@@ -663,15 +885,13 @@ def test_bbox_detection(target_description, count_id=0, auto_detect=True, click=
                 print(f"   Reasoning: {response_json.get('reasoning')}")
                 print(f"   Confidence: {response_json.get('confidence')}")
                 
-                # Move mouse
+                # Move mouse via MCP server tools if available; fallback to PyAutoGUI
                 print(f"\n🖱️  Moving mouse to ({x}, {y})...")
-                pygui.moveTo(x, y, duration=1)
-                
-                # Optional click
-                if click:
-                    print("👆 Clicking...")
-                    time.sleep(0.5)
-                    pygui.click()
+                if not _move_via_mcp_tools(x, y, click, duration=1.0):
+                    pygui.moveTo(x, y, duration=1)
+                    if click:
+                        time.sleep(0.5)
+                        pygui.click()
                 
                 return {
                     "success": True,
@@ -679,7 +899,8 @@ def test_bbox_detection(target_description, count_id=0, auto_detect=True, click=
                     "x": x,
                     "y": y,
                     "bbox": bbox,
-                    "confidence": response_json.get('confidence')
+                    "confidence": response_json.get('confidence'),
+                    "via": "local",
                 }
             else:
                 print(f"\n❌ Invalid box number: {box_number} (max: {len(element_map)})")

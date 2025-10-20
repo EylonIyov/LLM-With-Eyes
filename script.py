@@ -86,7 +86,7 @@ def health_function():
     """A simple health check function to verify API connectivity. """
     client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
     resp = client.chat.completions.create(
-        model="qwen/qwen2.5-vl-7b",
+        model="qwen2.5-vl-32b-instruct",
         messages=[{
             "role": "user",
     "content":[
@@ -96,13 +96,13 @@ def health_function():
     temperature=0.1
 )
     print(resp.choices[0].message.content)
-    
-    
-def promot_model(prompt):
+
+
+def promot_model(prompt, model_name = "qwen/qwen2.5-vl-7b"):
     """A simple health check function to verify API connectivity. """
     client = OpenAI(base_url="http://localhost:1234/v1/responses", api_key="lm-studio")
     resp = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
+        model=model_name,
         messages=[{
             "role": "user",
     "content":[
@@ -116,9 +116,9 @@ def promot_model(prompt):
 
 def capture_screenshot(count_id = 0):
     """Capture a screenshot and save it with a unique name."""
-    pygui.screenshot(f"screenshot_pygui_{count_id}.png") # Save the screenshot with a unique name, will later be deleted, currently not deleted for debugging
-    return f"screenshot_pygui_{count_id}.png" # Return the path of the saved screenshot
-    
+    pygui.screenshot(f"/screenshots/screenshot_pygui_{count_id}.png") # Save the screenshot with a unique name, will later be deleted, currently not deleted for debugging
+    return f"/screenshots/screenshot_pygui_{count_id}.png" # Return the path of the saved screenshot
+
 
 def send_screenshot_to_model(count_id = 0, prompt="Describe the image"):
     """""Send a captured screenshot to the model and print the response."""
@@ -155,7 +155,12 @@ def send_screenshot_to_model(count_id = 0, prompt="Describe the image"):
     
     
 if __name__ == "__main__":
-    example_middle_screen()
+    prompt = input("Enter your prompt for the model: ")
+    try:
+        promot_model(prompt, model_name = "qwen2.5-vl-32b-instruct")
+    except Exception as e:
+        print(f"Error occurred: {e}")
+        health_function()
     #invoke_mouse_keyboard(prompt)
     
     

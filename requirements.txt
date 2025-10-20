@@ -1,5 +1,7 @@
 openai
 pyautogui
 pillow
-base64
+opencv-python
+numpy
+requests
 mcp[cli]

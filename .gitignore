@@ -1,1 +1,7 @@
+.env
+training_dataset.json
+__pycache__/*
+cloud_screenshot*
 screenshot*
+*.log
+mcp-mouse-keyboard-server/__pycache__/

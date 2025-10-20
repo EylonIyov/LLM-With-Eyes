@@ -49,10 +49,7 @@ python script.py
 
 - 🖱️ **Computer Control** - Move mouse, click, type, and take screenshots
 - 👁️ **Vision Integration** - LLM sees your screen and identifies UI elements
-- 🎯 **Grid Detection** - Chess-board overlay for improved spatial accuracy
-- 📚 **Learning System** - Saves corrections to improve over time
 - 🔧 **MCP Integration** - Works with LM Studio and other MCP-compatible clients
-- 🎮 **Interactive Training** - Build custom datasets for your workflow
 
 ## 📋 Requirements
 
@@ -82,6 +79,7 @@ python script.py
 | `script.py` | Core functions and MCP integration |
 | `create_training_dataset.py` | Build custom training datasets |
 | `advanced_prompts.py` | Prompt engineering utilities |
+| `cloud_bbox_picker.py` | Cloud bbox-based selection via remote VLM; prints box number and can move/click |
 
 ## 🎯 Example Usage
 
@@ -93,12 +91,69 @@ python training.py
 # Verify and click!
 ```
 
-## 📊 Accuracy
+## ☁️ Cloud BBox Picker (remote model)
 
-- **Basic prompting:** ~30-40%
-- **With Quick Wins:** ~60-75%
-- **With grid overlay:** ~75-85%
-- **With training data (50+ examples):** ~80-90%
+Run a remote vision model (e.g., GPT-4o) to choose a numbered bounding box from an annotated screenshot, then optionally move/click the mouse locally.
+
+Prerequisites:
+- `pip install openai`
+- Set your API key via environment or `.env` file (key: `OPENAI_API_KEY`)
+
+Basic usage (quiet by default: prints only the chosen number):
+```powershell
+python .\cloud_bbox_picker.py --target "the green box"
+```
+
+Click after moving:
+```powershell
+python .\cloud_bbox_picker.py --target "the green box" --click
+```
+
+Provide API key explicitly (overrides env/.env):
+```powershell
+python .\cloud_bbox_picker.py --target "OK button" --api-key "<YOUR_KEY>"
+```
+
+Full CLI syntax:
+```text
+cloud_bbox_picker.py [--api-key KEY] [--model MODEL] --target TEXT [--no-move] [--click]
+					 [--move-duration SECS] [--verbose]
+					 [--image-format png|jpeg|webp] [--quality 1-100]
+					 [--resize-width PIXELS] [--no-crop] [--crop-only]
+					 [--max-tokens N]
+```
+
+Flags:
+- --api-key KEY           Use this API key (fallback: env OPENAI_API_KEY or .env)
+- --model MODEL           Remote model (default: gpt-4o)
+- --target TEXT           What to find (e.g., "red circle", "OK button")
+- --no-move               Don’t move the mouse (default is to move)
+- --click                 Click after moving
+- --move-duration SECS    Mouse move duration (default: 0.2)
+- --verbose               Verbose logs to stdout (quiet mode prints only the number)
+
+Performance flags (reduce upload size and latency):
+- --image-format FMT      png|jpeg|webp (default: jpeg)
+- --quality Q             1–100 (lossy formats; default: 80)
+- --resize-width W        Resize width in pixels, keep aspect ratio (default: 1280; 0 disables)
+- --no-crop               Don’t send the crop image
+- --crop-only             Send only the crop (fastest; skips full image)
+- --max-tokens N          Completion tokens cap (default: 96)
+
+Examples:
+- Fast and small, crop-only:
+```powershell
+python .\cloud_bbox_picker.py --target "red circle" --crop-only --image-format jpeg --quality 70 --resize-width 1024 --max-tokens 64
+```
+
+- Higher fidelity (larger payload):
+```powershell
+python .\cloud_bbox_picker.py --target "play button" --image-format png --resize-width 0 --max-tokens 120
+```
+
+Notes:
+- The script takes a screenshot, detects UI elements, draws numbered boxes, and builds a 2× annotated crop. It sends the prompt plus one or two images to the remote model, parses the returned JSON box_number, and moves/clicks locally unless disabled.
+- API key resolution order: `--api-key` CLI > `OPENAI_API_KEY` env var > `.env` file at repo root.
 
 ## 🤝 Contributing
 
@@ -118,5 +173,3 @@ MIT License - See LICENSE file for details
 ---
 
 **⚠️ Warning:** This tool can control your mouse and keyboard. Use verification mode when testing!
-
-**🎮 Have fun giving your LLM eyes!**
