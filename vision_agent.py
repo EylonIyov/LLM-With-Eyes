@@ -300,6 +300,45 @@ def _derive_state(element_map: Dict[int, Dict]) -> Dict[str, Any]:
     }
 
 
+def _normalize_quotes(s: str) -> str:
+    """Normalize curly quotes and backticks to standard quotes for easier parsing."""
+    try:
+        return (
+            s.replace("“", '"').replace("”", '"')
+             .replace("‘", "'").replace("’", "'")
+             .replace("`", "'")
+        )
+    except Exception:
+        return s
+
+
+def _extract_typing_intent(goal: str) -> Tuple[Optional[str], bool]:
+    """Extract a literal string to type from the goal, plus whether to press enter.
+
+    Heuristics:
+    - Look for quoted text after verbs like: type, search, enter, write, input, query
+    - Fallback to the first quoted segment if verbs not found
+    - Treat backticks and curly quotes as quotes
+    - requires_enter: goal mentions 'press enter', 'hit enter', 'submit', or 'search'
+    """
+    if not goal:
+        return None, False
+    g = _normalize_quotes(goal)
+    requires_enter = bool(re.search(r"\b(press|hit)\s+enter\b|\bsubmit\b|\bsearch\b", g, re.IGNORECASE))
+    # Prefer quoted strings following typing verbs
+    verb_pattern = r"(?:type|search|enter|write|input|query)\s*[\"']([^\"']+)[\"']"
+    m = re.search(verb_pattern, g, flags=re.IGNORECASE)
+    if m:
+        text = m.group(1).strip()
+        return (text if text else None), requires_enter
+    # Fallback: first quoted block anywhere
+    m2 = re.search(r"[\"']([^\"']+)[\"']", g)
+    if m2:
+        text = m2.group(1).strip()
+        return (text if text else None), requires_enter
+    return None, requires_enter
+
+
 def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Dict[str, Any]],
                        observations: Optional[Dict[str, Any]] = None,
                        memory: Optional[Dict[str, Any]] = None) -> str:
@@ -313,6 +352,8 @@ def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Di
     small_hint = (
         "Tip: If you cannot find the target in the current window, you may minimize the active window and look elsewhere.\n"
     )
+    # Typing intent hint extracted from the goal
+    ti_text, ti_enter = _extract_typing_intent(goal)
     obs_lines: List[str] = []
     if observations:
         if observations.get("element_count") is not None:
@@ -332,17 +373,31 @@ def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Di
             obs_lines.append(f"Last result: {observations['last_result']}")
         if observations.get("last_reason") is not None:
             obs_lines.append(f"Last reason: {observations['last_reason']}")
+        if observations.get("last_click_repeats") is not None:
+            obs_lines.append(f"Last click repeats: {observations['last_click_repeats']}")
+        if observations.get("last_click_input_candidate") is not None:
+            obs_lines.append(f"Last click looked like input: {observations['last_click_input_candidate']}")
     mem_lines: List[str] = []
     if memory:
         # include a compact KV list
         for k, v in list(memory.items())[:10]:
             mem_lines.append(f"{k}={v}")
     observations_block = ("Observed state:\n" + "\n".join(obs_lines) + "\n\n") if obs_lines else ""
+    typing_block = ""
+    if ti_text is not None or ti_enter:
+        tb: List[str] = ["Typing intent:"]
+        if ti_text is not None:
+            tb.append(f"- text: {ti_text}")
+        if ti_enter:
+            tb.append("- then_press_enter: True")
+        typing_block = "\n".join(tb) + "\n\n"
     memory_block = ("Working memory:\n" + "\n".join(mem_lines) + "\n\n") if mem_lines else ""
     schema = (
         "Return STRICT JSON with fields: action, params, and optional reason.\n"
         "Allowed actions and params:\n"
         "- click: {\"box_number\": int, \"button\": \"left|right\", \"clicks\": 1|2}\n"
+        "- double_click: {\"box_number\": int}\n"
+        "- right_click: {\"box_number\": int}\n"
         "- move: {\"box_number\": int}\n"
         "- type_text: {\"text\": string}\n"
         "- key: {\"key\": string}  # e.g., 'enter','esc','tab','up','down','left','right','backspace','delete','home','end'\n"
@@ -363,6 +418,8 @@ def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Di
         "7) If last_action_ok=false, adjust the plan: choose a different element or approach rather than repeating the same failed action.\n"
         "8) Before type_text, ensure focus is on the intended input (click it first if needed, based on the last action).\n"
         "9) Use only box_number values that appear in the catalog above; do not invent numbers.\n"
+        "10) If 'Typing intent' is provided below, after focusing the input, use type_text with exactly that string (no quotes, no extra spaces).\n"
+        "11) If 'Typing intent' indicates enter, follow typing by pressing the 'enter' key in the next step.\n"
     )
     instructions = (
         f"Goal: {goal}\n\n"
@@ -370,11 +427,25 @@ def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Di
         f"Previous steps (for continuity):\n{recent}\n\n"
         f"{observations_block}"
         f"{small_hint}"
+        f"{typing_block}"
         f"{memory_block}"
         f"{schema}\n"
         f"Respond with JSON only.\n"
     )
     return instructions
+
+
+# Small heuristic: is a UI element likely an input field?
+def _is_input_candidate(meta: Dict[str, Any]) -> bool:
+    try:
+        x, y, w, h = meta.get("bbox", (0, 0, 0, 0))
+        text = (meta.get("text") or "").lower()
+        # Heuristics: fairly wide and not too tall; or text hints
+        wide_flat = (w >= 200 and 18 <= h <= 90) or (w >= 320 and h <= 120)
+        text_hint = any(k in text for k in ("search", "type", "enter", "query", "find"))
+        return bool(wide_flat or text_hint)
+    except Exception:
+        return False
 
 
 # ------------- Perception -------------
@@ -547,6 +618,7 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
 
     history: List[Dict[str, Any]] = []
     last_clicked_box: Optional[int] = None
+    last_click_repeats: int = 0
     working_memory: Dict[str, Any] = {}
     for step in range(1, max(1, max_steps) + 1):
         bbox_path, shot_path, element_map, crop_path = perceive()
@@ -562,10 +634,16 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
             derived["last_params"] = history[-1].get("params")
             derived["last_result"] = history[-1].get("result")
             derived["last_reason"] = history[-1].get("reason")
+        # Add repeat count and input-candidate hint for the last clicked element
+        derived["last_click_repeats"] = last_click_repeats if last_clicked_box is not None else 0
+        if last_clicked_box is not None and last_clicked_box in element_map:
+            derived["last_click_input_candidate"] = _is_input_candidate(element_map[last_clicked_box])
+        else:
+            derived["last_click_input_candidate"] = None
 
         # Ask model; retry within the step on parse/invalid actions
         data: Dict[str, Any] = {}
-        allowed_actions = {"click","move","type_text","key","hotkey","scroll","wait","minimize_active","remember","forget","done"}
+        allowed_actions = {"click","double_click","right_click","move","type_text","key","hotkey","scroll","wait","minimize_active","remember","forget","done"}
         for retry in range(3):
             prompt = build_agent_prompt(goal, element_map, history, observations=derived, memory=working_memory)
             data = call_model(client, model, prompt, images)
@@ -578,10 +656,11 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
             a = (data.get("action") or "").lower().strip()
             p = data.get("params") if isinstance(data.get("params"), dict) else {}
             # Duplicate click guard
-            if a == "click" and isinstance(p.get("box_number"), (int, str)):
+            if a in ("click","double_click","right_click") and isinstance(p.get("box_number"), (int, str)):
                 bn = int(p["box_number"]) if isinstance(p["box_number"], str) and p["box_number"].isdigit() else p["box_number"]
-                if isinstance(bn, int) and last_clicked_box is not None and bn == last_clicked_box:
-                    history.append({"action": "info", "result": f"duplicate click on same box {bn} prevented; re-planning", "ok": False})
+                # Allow one immediate repeat click for focusing inputs; block further repeats
+                if isinstance(bn, int) and last_clicked_box is not None and bn == last_clicked_box and last_click_repeats >= 1:
+                    history.append({"action": "info", "result": f"avoiding repeated clicks on same box {bn}; re-planning", "ok": False})
                     time.sleep(0.2)
                     continue
             # If invalid or empty action, re-ask this step
@@ -604,9 +683,14 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
         reason = data.get("reason") if isinstance(data, dict) else None
         ok, result = execute_action(action, params, element_map, move_duration=move_duration)
         # Update last_clicked_box state
-        if (action or "").lower() == "click" and isinstance(params.get("box_number"), (int, str)):
+        if (action or "").lower() in ("click","double_click","right_click") and isinstance(params.get("box_number"), (int, str)):
             bn = int(params["box_number"]) if isinstance(params["box_number"], str) and params["box_number"].isdigit() else params["box_number"]
             if isinstance(bn, int):
+                # Track repeat count
+                if last_clicked_box == bn:
+                    last_click_repeats += 1
+                else:
+                    last_click_repeats = 0
                 last_clicked_box = bn
         # Update working memory on remember/forget actions
         if (action or "").lower() == "remember" and isinstance(params.get("key"), str):
