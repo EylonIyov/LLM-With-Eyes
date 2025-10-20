@@ -155,7 +155,32 @@ Notes:
 - The script takes a screenshot, detects UI elements, draws numbered boxes, and builds a 2× annotated crop. It sends the prompt plus one or two images to the remote model, parses the returned JSON box_number, and moves/clicks locally unless disabled.
 - API key resolution order: `--api-key` CLI > `OPENAI_API_KEY` env var > `.env` file at repo root.
 
-## 🤝 Contributing
+## � Vision Agent (Reason → Act loop)
+
+If you want the model to see the current screen, decide the next step, and use the mouse/keyboard like a normal user, run the agent loop:
+
+```powershell
+# Ensure OPENAI_API_KEY is set or present in .env
+python .\vision_agent.py --goal "Open the folder C:\\Users\\user\\Desktop\\dev and open training.html" --max-steps 6 --verbose
+```
+
+Key flags:
+- --goal: Natural-language objective; the agent plans one small action per step
+- --model: OpenAI model (default gpt-4o)
+- --api-key: API key (else uses env/.env)
+- --max-steps: Safety cap (default 6)
+- --move-duration: Mouse move duration (default 0.2s)
+- --verbose: Print model JSON and executed actions each step
+- --image-format/--quality/--resize-width/--no-crop: Performance tuning similar to the cloud picker
+
+Actions the model can return:
+- click or move on a numbered box (preferred)
+- type_text, key, hotkey, scroll, wait
+- done (when goal is satisfied)
+
+The agent re-detects elements every step and prefers grounded clicks via the numbered boxes.
+
+## �🤝 Contributing
 
 Contributions welcome! This project is experimental and there's lots of room for improvement.
 

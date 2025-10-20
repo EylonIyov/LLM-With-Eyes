@@ -5,3 +5,8 @@ cloud_screenshot*
 screenshot*
 *.log
 mcp-mouse-keyboard-server/__pycache__/
+*.png
+*.jpg
+*.jpeg
+.vscode/
+.__pycache__/
