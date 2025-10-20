@@ -304,11 +304,11 @@ def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Di
                        observations: Optional[Dict[str, Any]] = None,
                        memory: Optional[Dict[str, Any]] = None) -> str:
     catalog = _build_catalog_lines(element_map)
-    # Build a compact continuity context: last 3 steps with action, params, and result
+    # Build a compact continuity context: last 3 steps with action, ok, params, result, and reason
     recent_items = []
     for h in history[-3:]:
-        s = h.get('step', '?'); a = h.get('action'); p = h.get('params'); r = h.get('result')
-        recent_items.append(f"[step {s}] action={a} params={p} result={r}")
+        s = h.get('step', '?'); a = h.get('action'); ok = h.get('ok'); p = h.get('params'); r = h.get('result'); rsn = h.get('reason')
+        recent_items.append(f"[step {s}] action={a} ok={ok} params={p} result={r} reason={rsn}")
     recent = "\n".join(recent_items) or "(none)"
     small_hint = (
         "Tip: If you cannot find the target in the current window, you may minimize the active window and look elsewhere.\n"
@@ -324,6 +324,14 @@ def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Di
             obs_lines.append(f"Last clicked box: {observations['last_clicked_box']}")
         if observations.get("last_action_ok") is not None:
             obs_lines.append(f"Last action ok: {observations['last_action_ok']}")
+        if observations.get("last_action") is not None:
+            obs_lines.append(f"Last action: {observations['last_action']}")
+        if observations.get("last_params") is not None:
+            obs_lines.append(f"Last params: {observations['last_params']}")
+        if observations.get("last_result") is not None:
+            obs_lines.append(f"Last result: {observations['last_result']}")
+        if observations.get("last_reason") is not None:
+            obs_lines.append(f"Last reason: {observations['last_reason']}")
     mem_lines: List[str] = []
     if memory:
         # include a compact KV list
@@ -352,6 +360,9 @@ def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Di
         "4) If text input is needed, first click the input box, then use type_text on a subsequent step.\n"
         "5) Only one action per step. Keep actions small and purposeful.\n"
         "6) If the goal is fully satisfied, output action='done' with a concise message.\n"
+        "7) If last_action_ok=false, adjust the plan: choose a different element or approach rather than repeating the same failed action.\n"
+        "8) Before type_text, ensure focus is on the intended input (click it first if needed, based on the last action).\n"
+        "9) Use only box_number values that appear in the catalog above; do not invent numbers.\n"
     )
     instructions = (
         f"Goal: {goal}\n\n"
@@ -470,26 +481,57 @@ def call_model(client: OpenAI, model: str, prompt: str, images: List[Tuple[str, 
     content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
     for mime, b64 in images:
         content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+
+    # Attempt 1: enforce JSON with response_format
     try:
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "system", "content": "You are a helpful UI agent. Respond with STRICT JSON only."},
-                      {"role": "user", "content": content}],
+            messages=[
+                {"role": "system", "content": "You are a helpful UI agent. Respond with STRICT JSON only."},
+                {"role": "user", "content": content},
+            ],
             temperature=0,
             top_p=0.1,
             max_tokens=max(64, min(256, int(max_tokens))),
             response_format={"type": "json_object"},
         )
         raw = (resp.choices[0].message.content or "").strip()
-        data = json.loads(raw)
-        return data
-    except Exception as e:
-        # Return structured error with partial raw if available
+        if not raw:
+            raise ValueError("empty_content")
+        return json.loads(raw)
+    except Exception as e1:
+        # Fallback attempt 2: no response_format, stronger instruction
         try:
-            raw = raw  # type: ignore[name-defined]
-        except Exception:
-            raw = ""
-        return {"_error": f"model_or_parse_error: {e}", "_raw": raw[:800]}
+            resp2 = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful UI agent. Output ONLY valid JSON. No prose."},
+                    {"role": "user", "content": content},
+                ],
+                temperature=0,
+                top_p=0.1,
+                max_tokens=max(64, min(256, int(max_tokens))),
+            )
+            raw2 = (resp2.choices[0].message.content or "").strip()
+            # Try direct JSON parse
+            try:
+                return json.loads(raw2)
+            except Exception:
+                # Weak regex extraction of first JSON object
+                m = re.search(r"\{[\s\S]*\}", raw2)
+                if m:
+                    try:
+                        return json.loads(m.group(0))
+                    except Exception:
+                        pass
+            return {"_error": f"model_or_parse_error: {e1}", "_raw": (raw2 or "")[:800]}
+        except Exception as e2:
+            # Return structured error with partial raw if available from first attempt
+            try:
+                raw = raw  # type: ignore[name-defined]
+            except Exception:
+                raw = ""
+            return {"_error": f"model_or_parse_error: {e1}; fallback_error: {e2}", "_raw": raw[:800]}
 
 
 # ------------- Agent loop -------------
@@ -516,6 +558,10 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
         derived["last_clicked_box"] = last_clicked_box
         if history:
             derived["last_action_ok"] = bool(history[-1].get("ok"))
+            derived["last_action"] = history[-1].get("action")
+            derived["last_params"] = history[-1].get("params")
+            derived["last_result"] = history[-1].get("result")
+            derived["last_reason"] = history[-1].get("reason")
 
         # Ask model; retry within the step on parse/invalid actions
         data: Dict[str, Any] = {}
