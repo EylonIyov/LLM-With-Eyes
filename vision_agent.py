@@ -276,6 +276,62 @@ def _derive_state(element_map: Dict[int, Dict]) -> Dict[str, Any]:
     }
 
 
+def _is_input_like(meta: Dict[str, Any]) -> bool:
+    """Heuristic: does this element look like a text input/search field?
+    Generic, non-site-specific. Prefers wide, moderately tall boxes, roughly center areas,
+    and allows OCR hints when present.
+    """
+    try:
+        x, y, w, h = meta.get("bbox", (0, 0, 0, 0))
+        if w <= 0 or h <= 0:
+            return False
+        aspect = (w / float(h)) if h > 0 else 0.0
+        # Typical input fields are wide rectangles
+        if aspect < 2.2:
+            return False
+        if h < 20 or h > 220:
+            return False
+        region = (meta.get("region") or "").lower()
+        # Inputs often in center/middle areas; don't require but boost when present
+        region_bonus = 1 if ("middle" in region or "center" in region) else 0
+        # OCR hints
+        txt = (meta.get("text") or "").lower()
+        text_hint = 1 if any(k in txt for k in ("search", "find", "type", "enter", "query")) else 0
+        score = 0
+        # aspect scoring: wider gets more
+        if aspect >= 2.2:
+            score += min(3, int(aspect // 3))
+        if 28 <= h <= 120:
+            score += 2
+        score += region_bonus + text_hint
+        return score >= 3
+    except Exception:
+        return False
+
+
+def _limit_for_prompt(element_map: Dict[int, Dict], max_items: int = 150) -> Dict[int, Dict]:
+    """Return a reduced element map for prompting only, to cut noise when too many boxes exist.
+    Keeps items by a simple score: input-likeness, presence of text, area.
+    Does NOT alter the real element_map used for execution, only the catalog seen by the model.
+    """
+    try:
+        if len(element_map) <= max_items:
+            return element_map
+        scored = []
+        for idx, meta in element_map.items():
+            area = int(meta.get("area", 0))
+            text = meta.get("text") or ""
+            has_text = 1 if text.strip() else 0
+            input_bonus = 2 if _is_input_like(meta) else 0
+            score = input_bonus * 10 + has_text * 3 + min(area, 50000) / 5000.0
+            scored.append((score, idx))
+        scored.sort(reverse=True)
+        keep = set(idx for _, idx in scored[:max_items])
+        return {i: element_map[i] for i in sorted(keep)}
+    except Exception:
+        return element_map
+
+
 def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Dict[str, Any]],
                        observations: Optional[Dict[str, Any]] = None,
                        memory: Optional[Dict[str, Any]] = None) -> str:
@@ -288,6 +344,11 @@ def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Di
     recent = "\n".join(recent_items) or "(none)"
     small_hint = (
         "Tip: If you cannot find the target in the current window, you may minimize the active window and look elsewhere.\n"
+    )
+    typing_hint = (
+        "Typing workflow: First click a text input field to focus it (e.g., search box, address bar),\n"
+        "then use 'type_text' with the exact string. If needed, send 'key' 'enter' to submit.\n"
+        "If no obvious input is visible, you may use hotkey ['ctrl','l'] to focus the browser address bar before typing.\n"
     )
     obs_lines: List[str] = []
     if observations:
@@ -328,13 +389,15 @@ def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Di
         "4) If text input is needed, first click the input box, then use type_text on a subsequent step.\n"
         "5) Only one action per step. Keep actions small and purposeful.\n"
         "6) If the goal is fully satisfied, output action='done' with a concise message.\n"
+        "7) Only choose a box_number that appears in the Catalog below; do NOT invent numbers seen on the image overlay.\n"
     )
     instructions = (
         f"Goal: {goal}\n\n"
-        f"Catalog of visible elements (use these box numbers):\n{catalog}\n\n"
+        f"Catalog of visible elements (choose only from these box numbers):\n{catalog}\n\n"
         f"Previous steps (for continuity):\n{recent}\n\n"
         f"{observations_block}"
         f"{small_hint}"
+        f"{typing_hint}"
         f"{memory_block}"
         f"{schema}\n"
         f"Respond with JSON only.\n"
@@ -495,7 +558,9 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
         # Re-plan loop to avoid repeating same click (esp. Start Game)
         data = None
         for retry in range(2):
-            prompt = build_agent_prompt(goal, element_map, history, observations=derived, memory=working_memory)
+            # Reduce catalog noise for the prompt only; keep execution map unchanged
+            prompt_map = _limit_for_prompt(element_map, max_items=150)
+            prompt = build_agent_prompt(goal, prompt_map, history, observations=derived, memory=working_memory)
             data = call_model(client, model, prompt, images)
             if verbose:
                 print(f"\nStep {step} retry {retry} model JSON:\n{json.dumps(data, indent=2)[:1200]}")
@@ -519,6 +584,35 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
         action = data.get("action") if isinstance(data, dict) else None
         params = data.get("params") if isinstance(data, dict) and isinstance(data.get("params"), dict) else {}
         reason = data.get("reason") if isinstance(data, dict) else None
+        # Stronger precondition: avoid typing without a recent click on an input-like element
+        if (action or "").lower() == "type_text":
+            recent_clicked_meta = None
+            # Look back a couple of steps for the last successful click and get its meta
+            for h in reversed(history[-3:]):
+                if h.get("action") == "click" and h.get("ok"):
+                    bn = h.get("params", {}).get("box_number")
+                    if isinstance(bn, str) and bn.isdigit():
+                        bn = int(bn)
+                    if isinstance(bn, int) and bn in element_map:
+                        recent_clicked_meta = element_map.get(bn)
+                    break
+            # Also allow typing if the last step pressed Ctrl+L (focuses browser address bar)
+            if not recent_clicked_meta and history:
+                last = history[-1]
+                if last.get("action") == "hotkey":
+                    keys = last.get("params", {}).get("keys")
+                    if isinstance(keys, list):
+                        keys_l = [str(k).lower() for k in keys]
+                        if "ctrl" in keys_l and "l" in keys_l:
+                            recent_clicked_meta = {"bbox": (0, 0, 300, 40)}  # dummy acceptable input-like
+            if not recent_clicked_meta or not _is_input_like(recent_clicked_meta):
+                ok = False
+                result = "refused typing: last focus target doesn't look like a text input; click an input or use hotkey ['ctrl','l']"
+                history.append({"step": step, "action": action, "params": params, "ok": ok, "result": result, "reason": reason})
+                if verbose:
+                    print(f"Executed: {action} -> {result} (ok={ok})")
+                time.sleep(0.4)
+                continue
         ok, result = execute_action(action, params, element_map, move_duration=move_duration)
         # Update last_clicked_box state
         if (action or "").lower() == "click" and isinstance(params.get("box_number"), (int, str)):
@@ -542,8 +636,8 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
             if verbose:
                 print("Agent reports done.")
             return 0
-        # brief wait to let UI update before next perception
-        time.sleep(0.6)
+        # Per-step cooldown to allow pages/UI to load before next observation
+        time.sleep(1.0)
     if verbose:
         print("Reached max steps without 'done'.")
     return 0
