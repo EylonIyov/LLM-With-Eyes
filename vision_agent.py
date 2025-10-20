@@ -245,12 +245,36 @@ def _build_annotated_crop2x(screenshot_path: str, element_map: Dict[int, Dict]) 
         return None, None
 
 
-def _build_catalog_lines(element_map: Dict[int, Dict]) -> str:
+def _limit_for_prompt(element_map: Dict[int, Dict], max_items: int = 100) -> Dict[int, Dict]:
+    """Limit elements for the prompt/catalog only to reduce noise.
+    Rank by area, presence of OCR text, and a simple centrality tie-breaker.
+    Execution continues to use the full element_map.
+    """
     if not element_map:
+        return element_map
+    ranked: List[Tuple[int, int, int, int]] = []
+    # area, has_text, -centrality
+    for idx, meta in element_map.items():
+        x, y, w, h = meta.get("bbox", (0, 0, 0, 0))
+        area = int(w) * int(h)
+        txt = (meta.get("text") or "").strip()
+        cx, cy = meta.get("center", (x + w // 2, y + h // 2))
+        # approximate centrality (smaller better). We negate for sorting desc.
+        centrality = -(abs(int(cx)) + abs(int(cy)))
+        ranked.append((idx, area, 1 if txt else 0, centrality))
+    ranked.sort(key=lambda t: (-t[1], -t[2], -t[3]))
+    keep = {idx: element_map[idx] for idx, *_ in ranked[:max_items]}
+    return keep
+
+
+def _build_catalog_lines(element_map: Dict[int, Dict]) -> str:
+    # Limit catalog for the prompt only; execution still uses full map
+    em = _limit_for_prompt(element_map, max_items=80)
+    if not em:
         return "(no catalog)"
     lines: List[str] = []
-    for idx in sorted(element_map.keys()):
-        meta = element_map[idx]
+    for idx in sorted(em.keys()):
+        meta = em[idx]
         x, y, w, h = meta.get("bbox", (0, 0, 0, 0))
         region = meta.get("region", "?")
         color = meta.get("color", "?")
@@ -258,7 +282,7 @@ def _build_catalog_lines(element_map: Dict[int, Dict]) -> str:
         if len(txt) > 80:
             txt = txt[:77] + "..."
         lines.append(f"- Box {idx}: region={region}, color={color}, size={w}x{h}, text=\"{txt}\"")
-    return "\n".join(lines[:100])
+    return "\n".join(lines)
 
 
 # ------------- Prompt builder -------------
@@ -446,25 +470,26 @@ def call_model(client: OpenAI, model: str, prompt: str, images: List[Tuple[str, 
     content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
     for mime, b64 in images:
         content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "system", "content": "You are a helpful UI agent. Respond with STRICT JSON only."},
-                  {"role": "user", "content": content}],
-        temperature=0,
-        top_p=0.1,
-        max_tokens=max(64, min(256, int(max_tokens))),
-    )
-    raw = resp.choices[0].message.content or ""
-    cleaned = raw.strip()
-    if cleaned.startswith('```'):
-        m = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', cleaned, re.S)
-        if m:
-            cleaned = m.group(1).strip()
     try:
-        data = json.loads(cleaned)
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": "You are a helpful UI agent. Respond with STRICT JSON only."},
+                      {"role": "user", "content": content}],
+            temperature=0,
+            top_p=0.1,
+            max_tokens=max(64, min(256, int(max_tokens))),
+            response_format={"type": "json_object"},
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        data = json.loads(raw)
         return data
     except Exception as e:
-        return {"_error": f"parse_error: {e}", "_raw": cleaned[:500]}
+        # Return structured error with partial raw if available
+        try:
+            raw = raw  # type: ignore[name-defined]
+        except Exception:
+            raw = ""
+        return {"_error": f"model_or_parse_error: {e}", "_raw": raw[:800]}
 
 
 # ------------- Agent loop -------------
@@ -492,18 +517,19 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
         if history:
             derived["last_action_ok"] = bool(history[-1].get("ok"))
 
-        # Re-plan loop to avoid repeating same click (esp. Start Game)
-        data = None
-        for retry in range(2):
+        # Ask model; retry within the step on parse/invalid actions
+        data: Dict[str, Any] = {}
+        allowed_actions = {"click","move","type_text","key","hotkey","scroll","wait","minimize_active","remember","forget","done"}
+        for retry in range(3):
             prompt = build_agent_prompt(goal, element_map, history, observations=derived, memory=working_memory)
             data = call_model(client, model, prompt, images)
             if verbose:
                 print(f"\nStep {step} retry {retry} model JSON:\n{json.dumps(data, indent=2)[:1200]}")
             if "_error" in data:
                 history.append({"action": "error", "result": data.get("_error"), "ok": False})
-                time.sleep(0.4)
+                time.sleep(0.3)
                 continue
-            a = (data.get("action") or "").lower()
+            a = (data.get("action") or "").lower().strip()
             p = data.get("params") if isinstance(data.get("params"), dict) else {}
             # Duplicate click guard
             if a == "click" and isinstance(p.get("box_number"), (int, str)):
@@ -511,9 +537,20 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
                 if isinstance(bn, int) and last_clicked_box is not None and bn == last_clicked_box:
                     history.append({"action": "info", "result": f"duplicate click on same box {bn} prevented; re-planning", "ok": False})
                     time.sleep(0.2)
-                    continue  # ask the model again within this step
+                    continue
+            # If invalid or empty action, re-ask this step
+            if not a or a not in allowed_actions:
+                history.append({"action": "error", "result": f"invalid action '{a}'", "ok": False})
+                time.sleep(0.2)
+                continue
             # Good to proceed
             break
+        else:
+            # All retries failed → do not execute None; wait and re-observe next step
+            if verbose:
+                print("No valid action after retries; waiting 1.0s and re-observing.", file=sys.stderr)
+            time.sleep(1.0)
+            continue
 
         # Execute the chosen action
         action = data.get("action") if isinstance(data, dict) else None
