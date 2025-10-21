@@ -818,6 +818,9 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
     working_memory["goal_summary"] = _shorten_text(goal, 96)
 
     for step in range(1, max(1, max_steps) + 1):
+        # Add a short delay before taking the next screenshot so the UI can update after the previous action
+        if step > 1:
+            time.sleep(1.5)
         shot_path, annotated_path, element_map = perceive()
 
         images: List[Tuple[str, str]] = [
@@ -929,8 +932,7 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
             if verbose:
                 print("Agent reports done.")
             return 0
-    # Per-step cooldown to allow pages/UI to load before next observation (delay next screenshot)
-    time.sleep(1.5)
+    # Note: pacing is handled at the top of the loop before perception
     if verbose:
         print("Reached max steps without 'done'.")
     return 0
