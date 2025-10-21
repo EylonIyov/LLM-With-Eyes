@@ -1,4 +1,4 @@
-# SeeClick‑style Vision Agent (Windows)
+# Computer Use Agent
 
 Grounded computer‑use agent that observes the screen, reasons over a structured list of detected UI elements, and acts via mouse/keyboard tools. Includes a simple training utility to collect few‑shot examples and test local VLMs.
 
