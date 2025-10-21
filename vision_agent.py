@@ -929,8 +929,8 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
             if verbose:
                 print("Agent reports done.")
             return 0
-        # Per-step cooldown to allow pages/UI to load before next observation
-        time.sleep(1.0)
+    # Per-step cooldown to allow pages/UI to load before next observation (delay next screenshot)
+    time.sleep(1.5)
     if verbose:
         print("Reached max steps without 'done'.")
     return 0
