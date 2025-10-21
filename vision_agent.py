@@ -489,6 +489,12 @@ def execute_action(action: str, params: Dict[str, Any], element_map: Dict[int, D
                 button = "right"
             ok1 = mcp_move(cx, cy, duration=move_duration)
             ok2 = mcp_click(button=button, clicks=clicks)
+            # Small delay after focusing click on likely input elements to ensure caret focus
+            try:
+                if a == "click" and _is_input_candidate(element_map.get(bn, {})):
+                    time.sleep(0.25)
+            except Exception:
+                pass
             return ok1 and ok2, f"{a} on {bn} -> {cx},{cy}"
 
         if a == "type_text":
