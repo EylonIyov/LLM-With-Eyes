@@ -1,200 +1,186 @@
-# LLM With Eyes 👁️
+# SeeClick‑style Vision Agent (Windows)
 
-> Give your local LLM vision and control over your computer's mouse and keyboard
+Grounded computer‑use agent that observes the screen, reasons over a structured list of detected UI elements, and acts via mouse/keyboard tools. Includes a simple training utility to collect few‑shot examples and test local VLMs.
 
-A Python framework that enables vision-capable LLMs to see your screen and control your computer through natural language commands.
-
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![LM Studio](https://img.shields.io/badge/LM%20Studio-Compatible-green.svg)](https://lmstudio.ai/)
-[![MCP](https://img.shields.io/badge/MCP-Protocol-orange.svg)](https://modelcontextprotocol.io/)
-
-## 🚀 Quick Start
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/EylonIyov/LLM-With-Eyes.git
-cd LLM-With-Eyes
-
-# Create virtual environment
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1  # Windows PowerShell
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Basic Usage
-
-**1. Test Vision + Mouse Control:**
-```bash
-python training.py
-```
-Choose option 5 to find and click UI elements.
-
-**2. Grid-Based Detection (More Accurate):**
-```bash
-python grid_detection.py
-```
-Uses visual grid overlay for better spatial reasoning.
-
-**3. Run with MCP Server:**
-```bash
-# See setup.md for MCP server configuration
-python script.py
-```
-
-## ✨ Features
-
-- 🖱️ **Computer Control** - Move mouse, click, type, and take screenshots
-- 👁️ **Vision Integration** - LLM sees your screen and identifies UI elements
-- 🔧 **MCP Integration** - Works with LM Studio and other MCP-compatible clients
-
-## 📋 Requirements
-
-- Python 3.8+
-- LM Studio with a vision-capable model (e.g., Qwen2.5-VL)
-- Windows (currently - mouse/keyboard control is OS-specific)
-
-## 🎓 How It Works
-
-1. **Screenshot** - Captures your screen
-2. **Vision Analysis** - LLM sees the screenshot with optional grid overlay
-3. **Element Detection** - Model identifies UI element coordinates
-4. **Action Execution** - Controls mouse/keyboard via PyAutoGUI or MCP
-
-## 📖 Documentation
-
-- **[Quick Wins Guide](QUICK_WINS_README.md)** - Improve accuracy in minutes
-- **[Training Guide](TRAINING_GUIDE.md)** - Advanced training strategies
-- **[MCP Setup](setup.md)** - Configure MCP server (if using MCP)
-
-## 🛠️ Key Scripts
-
-| Script | Description |
-|--------|-------------|
-| `training.py` | Main training and testing interface |
-| `grid_detection.py` | Grid-based element detection |
-| `script.py` | Core functions and MCP integration |
-| `create_training_dataset.py` | Build custom training datasets |
-| `advanced_prompts.py` | Prompt engineering utilities |
-| `cloud_bbox_picker.py` | Cloud bbox-based selection via remote VLM; prints box number and can move/click |
-
-## 🎯 Example Usage
-
-```python
-# Find and click the Chrome icon
-python training.py
-# Choose option 5
-# Enter: "the Chrome icon in the taskbar"
-# Verify and click!
-```
-
-## ☁️ Cloud BBox Picker (remote model)
-
-Run a remote vision model (e.g., GPT-4o) to choose a numbered bounding box from an annotated screenshot, then optionally move/click the mouse locally.
-
-Prerequisites:
-- `pip install openai`
-- Set your API key via environment or `.env` file (key: `OPENAI_API_KEY`)
-
-Basic usage (quiet by default: prints only the chosen number):
-```powershell
-python .\cloud_bbox_picker.py --target "the green box"
-```
-
-Click after moving:
-```powershell
-python .\cloud_bbox_picker.py --target "the green box" --click
-```
-
-Provide API key explicitly (overrides env/.env):
-```powershell
-python .\cloud_bbox_picker.py --target "OK button" --api-key "<YOUR_KEY>"
-```
-
-Full CLI syntax:
-```text
-cloud_bbox_picker.py [--api-key KEY] [--model MODEL] --target TEXT [--no-move] [--click]
-					 [--move-duration SECS] [--verbose]
-					 [--image-format png|jpeg|webp] [--quality 1-100]
-					 [--resize-width PIXELS] [--no-crop] [--crop-only]
-					 [--max-tokens N]
-```
-
-Flags:
-- --api-key KEY           Use this API key (fallback: env OPENAI_API_KEY or .env)
-- --model MODEL           Remote model (default: gpt-4o)
-- --target TEXT           What to find (e.g., "red circle", "OK button")
-- --no-move               Don’t move the mouse (default is to move)
-- --click                 Click after moving
-- --move-duration SECS    Mouse move duration (default: 0.2)
-- --verbose               Verbose logs to stdout (quiet mode prints only the number)
-
-Performance flags (reduce upload size and latency):
-- --image-format FMT      png|jpeg|webp (default: jpeg)
-- --quality Q             1–100 (lossy formats; default: 80)
-- --resize-width W        Resize width in pixels, keep aspect ratio (default: 1280; 0 disables)
-- --no-crop               Don’t send the crop image
-- --crop-only             Send only the crop (fastest; skips full image)
-- --max-tokens N          Completion tokens cap (default: 96)
-
-Examples:
-- Fast and small, crop-only:
-```powershell
-python .\cloud_bbox_picker.py --target "red circle" --crop-only --image-format jpeg --quality 70 --resize-width 1024 --max-tokens 64
-```
-
-- Higher fidelity (larger payload):
-```powershell
-python .\cloud_bbox_picker.py --target "play button" --image-format png --resize-width 0 --max-tokens 120
-```
-
-Notes:
-- The script takes a screenshot, detects UI elements, draws numbered boxes, and builds a 2× annotated crop. It sends the prompt plus one or two images to the remote model, parses the returned JSON box_number, and moves/clicks locally unless disabled.
-- API key resolution order: `--api-key` CLI > `OPENAI_API_KEY` env var > `.env` file at repo root.
-
-## � Vision Agent (Reason → Act loop)
-
-If you want the model to see the current screen, decide the next step, and use the mouse/keyboard like a normal user, run the agent loop:
-
-```powershell
-# Ensure OPENAI_API_KEY is set or present in .env
-python .\vision_agent.py --goal "Open the folder C:\\Users\\user\\Desktop\\dev and open training.html" --max-steps 6 --verbose
-```
-
-Key flags:
-- --goal: Natural-language objective; the agent plans one small action per step
-- --model: OpenAI model (default gpt-4o)
-- --api-key: API key (else uses env/.env)
-- --max-steps: Safety cap (default 6)
-- --move-duration: Mouse move duration (default 0.2s)
-- --verbose: Print model JSON and executed actions each step
-- --image-format/--quality/--resize-width/--no-crop: Performance tuning similar to the cloud picker
-
-Actions the model can return:
-- click or move on a numbered box (preferred)
-- type_text, key, hotkey, scroll, wait
-- done (when goal is satisfied)
-
-The agent re-detects elements every step and prefers grounded clicks via the numbered boxes.
-
-## �🤝 Contributing
-
-Contributions welcome! This project is experimental and there's lots of room for improvement.
-
-## 📝 License
-
-MIT License - See LICENSE file for details
-
-## 🙏 Acknowledgments
-
-- Built with [PyAutoGUI](https://pyautogui.readthedocs.io/)
-- Uses [OpenAI API](https://platform.openai.com/docs/api-reference) format
-- Compatible with [LM Studio](https://lmstudio.ai/)
-- Supports [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
+## Highlights
+- Grounded actions: Interact by referencing numbered boxes (click_box, hover_box, etc.) anchored to detected UI elements.
+- Strict JSON outputs: The VLM returns one action per step as strict JSON for reliable execution.
+- Multi‑view perception: Raw screenshot + annotated overlay with numbered boxes.
+- Short post‑action delay: The agent waits ~1.5s after each action before taking the next screenshot, allowing the UI to update.
+- Execution: MCP mouse/keyboard tools with PyAutoGUI fallback (Windows).
 
 ---
 
-**⚠️ Warning:** This tool can control your mouse and keyboard. Use verification mode when testing!
+## How it Works
+1. Observe
+   - Capture a screenshot.
+   - Detect UI elements and generate numbered bounding boxes with brief OCR text.
+   - Build a compact “catalog” of boxes and attach annotated images to the prompt.
+
+2. Reason
+   - Send the goal, recent history, memory, and the structured box list to a VLM.
+   - The VLM replies with strict JSON describing the next action.
+
+3. Act
+   - Execute the action (mouse/keyboard via MCP, with PyAutoGUI fallback).
+   - Wait ~1.5 seconds, then take the next screenshot and repeat until done or max steps reached.
+
+---
+
+## Requirements
+- Windows 10/11
+- Python 3.10+
+- Packages (install what your code imports):
+  - openai
+  - pyautogui
+  - pillow
+  - requests
+  - plus any local modules (bbox_detection.py, script.py, advanced_prompts.py)
+- Optional: LM Studio (OpenAI‑compatible server) for local VLM testing
+
+Install:
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -U pip
+pip install openai pyautogui pillow requests
+```
+
+If you use additional detectors (e.g., OCR/CV), install their packages too.
+
+---
+
+## Configuration
+- API
+  - OPENAI_API_KEY in your environment or .env (if calling OpenAI).
+  - Or run a local server (e.g., LM Studio) and point your client to http://localhost:1234/v1.
+- Permissions
+  - On Windows, run VS Code or the terminal “as Administrator” so PyAutoGUI/MCP can control the mouse/keyboard.
+- Display
+  - Prefer 100% scaling to avoid coordinate offsets.
+
+---
+
+## Run the Vision Agent
+Quick start (PowerShell):
+```powershell
+python .\vision_agent.py --goal "Open the folder C:\Users\user\Desktop\dev and open training.html" --max-steps 6 --verbose
+```
+
+Notes
+- The agent expects the VLM to return strict JSON (no Markdown fences).
+- A short delay (~1.5s) is applied after each action before the next screenshot to let the UI settle.
+
+---
+
+## Action Schema (VLM → Agent)
+The model must return strict JSON like:
+```json
+{
+  "action": "click_box",
+  "params": { "box_id": 7 },
+  "reason": "Focus the search input",
+  "plan": "Then type the query"
+}
+```
+
+Allowed actions
+- Grounded mouse
+  - click_box, double_click_box, right_click_box, hover_box
+    - params: { "box_id": <int> }
+- Typing
+  - type_text
+    - params: { "text": "<string>", "submit": <bool, optional> }
+- Keys
+  - key
+    - params: { "key": "<string>" }           // e.g., "enter", "esc"
+  - hotkey
+    - params: { "keys": ["ctrl","l"] }
+- Other
+  - scroll
+    - params: { "amount": <int> }             // positive=up, negative=down
+  - wait
+    - params: { "seconds": <float> }
+  - remember / forget
+    - params: { "key": "<string>", "value": "<any>" } // forget: { "key": "<string>" }
+  - done
+    - params: { "message": "<string>" }
+
+Legacy coordinate/description clicks may exist but prefer the grounded _box variants.
+
+---
+
+## Example Trajectory
+1) Focus search bar
+```json
+{ "action": "click_box", "params": { "box_id": 12 }, "reason": "Focus the search field" }
+```
+2) Type and submit
+```json
+{ "action": "type_text", "params": { "text": "Eylon Iyov", "submit": true } }
+```
+3) Finish
+```json
+{ "action": "done", "params": { "message": "Search submitted" } }
+```
+
+---
+
+## Timing and Delays
+- After each executed action, the agent waits ~1.5 seconds before taking the next screenshot. This prevents stale captures and lets pages/app windows update.
+- You can still add explicit waits via the wait action if a step needs longer.
+
+---
+
+## Training Utilities (training.py)
+Use local VLMs to practice coordinate grounding and build few‑shot examples.
+
+- Backends
+  - Uses OpenAI SDK pointed at LM Studio:
+    - base_url: http://localhost:1234/v1
+    - model: qwen/qwen2.5-vl-7b (adjust to your local model)
+
+- Dataset
+  - Saves examples to training_dataset.json with screenshot, ground‑truth coordinates, and optional model prediction error.
+
+Run:
+```powershell
+python .\training.py
+```
+
+Modes
+1. Predefined training dataset
+2. Interactive training (describe a target; model finds it)
+3. Single supervised example (you provide ground‑truth coordinates)
+4. Find element without ground truth (just get model output)
+5. Test: Find and click an element (optional verification + save corrections)
+6. View training statistics
+
+Key functions
+- capture_screenshot, encode_image_to_base64 (from script.py)
+- create_few_shot_prompt, create_region_prompt (from advanced_prompts.py)
+- invoke_mouse_keyboard to execute moves/clicks via MCP
+
+Tips
+- Use “verify before click” to correct mistakes and save better examples.
+- Keep your display at 100% scaling for coordinate consistency.
+
+---
+
+## Troubleshooting
+- Model outputs Markdown code fences
+  - Ensure the system prompt instructs “strict JSON only” and strip fences if needed.
+- No boxes or incorrect detections
+  - Check bbox_detection.py and its dependencies (OCR/CV).
+- Mouse/keyboard not moving
+  - Run the shell as Administrator; confirm PyAutoGUI works outside the agent.
+- Screenshots appear stale
+  - The built‑in ~1.5s post‑action delay helps; add a wait action for slow pages.
+
+---
+
+## Contributing
+- Open issues for detection errors, action schema extensions, or model prompt improvements.
+- Share tricky test cases and few‑shot examples.
+
+License: MIT
