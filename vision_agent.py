@@ -11,7 +11,7 @@ Usage (PowerShell):
     python .\vision_agent.py --goal "Open the folder C:\\Users\\user\\Desktop\\dev and open training.html" --max-steps 6 --verbose
 
 Notes:
-- Allowed actions: click/move on a box number, type_text, key, hotkey, scroll, wait, done
+- Allowed actions: click_box/double_click_box/right_click_box/hover_box, type_text, key, hotkey, scroll, wait, remember, forget, done
 - The agent prefers interacting with provided box numbers to remain grounded in the UI
 """
 
@@ -285,6 +285,107 @@ def _build_catalog_lines(element_map: Dict[int, Dict]) -> str:
     return "\n".join(lines)
 
 
+def _shorten_text(value: str, limit: int = 64) -> str:
+    try:
+        cleaned = re.sub(r"\s+", " ", value or "").strip()
+    except Exception:
+        cleaned = (value or "").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 3)] + "..."
+
+
+def _format_memory(memory: Optional[Dict[str, Any]]) -> str:
+    if not memory:
+        return "(none)"
+    lines: List[str] = []
+    for k in sorted(memory.keys()):
+        try:
+            v = memory[k]
+            if isinstance(v, (dict, list)):
+                v_repr = json.dumps(v, ensure_ascii=True)
+            else:
+                v_repr = str(v)
+        except Exception:
+            v_repr = "<unserializable>"
+        lines.append(f"{k} = {v_repr}")
+        if len(lines) >= 12:
+            lines.append("...")
+            break
+    return "\n".join(lines)
+
+
+def _format_history(history: List[Dict[str, Any]], limit: int = 6) -> str:
+    if not history:
+        return "(no prior steps)"
+    recent = history[-limit:]
+    lines: List[str] = []
+    for item in recent:
+        step = item.get("step", "?")
+        action = item.get("action") or "?"
+        ok = item.get("ok")
+        params = item.get("params")
+        result = item.get("result")
+        try:
+            params_repr = json.dumps(params, ensure_ascii=True)
+        except Exception:
+            params_repr = str(params)
+        line = f"[{step}] action={action} ok={ok} params={params_repr} result={_shorten_text(str(result), 72)}"
+        if item.get("reason"):
+            line += f" reason={_shorten_text(str(item.get('reason')), 48)}"
+        if item.get("plan"):
+            plan_val = item.get("plan")
+            plan_repr = plan_val
+            if isinstance(plan_val, (dict, list)):
+                try:
+                    plan_repr = json.dumps(plan_val, ensure_ascii=True)
+                except Exception:
+                    plan_repr = str(plan_val)
+            line += f" plan={_shorten_text(str(plan_repr), 48)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _build_structured_observation(element_map: Dict[int, Dict], max_items: int = 60) -> str:
+    if not element_map:
+        return "(no elements detected)"
+    limited = _limit_for_prompt(element_map, max_items=max_items)
+    lines: List[str] = []
+    for idx in sorted(limited.keys()):
+        meta = element_map[idx]
+        x, y, w, h = meta.get("bbox", (0, 0, 0, 0))
+        region = meta.get("region", "?")
+        color = meta.get("color", "?")
+        text = _shorten_text(meta.get("text") or "")
+        conf = meta.get("text_confidence")
+        conf_str = f"{int(conf)}" if isinstance(conf, (int, float)) else "?"
+        cx, cy = meta.get("center", (x + w // 2, y + h // 2))
+        lines.append(
+            f"Box {idx}: region={region} size={w}x{h} color={color} text=\"{text}\" conf={conf_str} center=({cx}, {cy})"
+        )
+    return "\n".join(lines)
+
+
+def _format_observations(observations: Optional[Dict[str, Any]]) -> str:
+    if not observations:
+        return "(none)"
+    lines: List[str] = []
+    for key in sorted(observations.keys()):
+        value = observations[key]
+        if isinstance(value, (dict, list)):
+            try:
+                value_repr = json.dumps(value, ensure_ascii=True)
+            except Exception:
+                value_repr = str(value)
+        else:
+            value_repr = str(value)
+        lines.append(f"{key}: {value_repr}")
+        if len(lines) >= 12:
+            lines.append("...")
+            break
+    return "\n".join(lines)
+
+
 # ------------- Prompt builder -------------
 
 def _derive_state(element_map: Dict[int, Dict]) -> Dict[str, Any]:
@@ -342,95 +443,48 @@ def _extract_typing_intent(goal: str) -> Tuple[Optional[str], bool]:
 def build_agent_prompt(goal: str, element_map: Dict[int, Dict], history: List[Dict[str, Any]],
                        observations: Optional[Dict[str, Any]] = None,
                        memory: Optional[Dict[str, Any]] = None) -> str:
-    catalog = _build_catalog_lines(element_map)
-    # Build a compact continuity context: last 3 steps with action, ok, params, result, and reason
-    recent_items = []
-    for h in history[-3:]:
-        s = h.get('step', '?'); a = h.get('action'); ok = h.get('ok'); p = h.get('params'); r = h.get('result'); rsn = h.get('reason')
-        recent_items.append(f"[step {s}] action={a} ok={ok} params={p} result={r} reason={rsn}")
-    recent = "\n".join(recent_items) or "(none)"
-    small_hint = (
-        "Tip: If you cannot find the target in the current window, you may minimize the active window and look elsewhere.\n"
-    )
-    # Typing intent hint extracted from the goal
-    ti_text, ti_enter = _extract_typing_intent(goal)
-    obs_lines: List[str] = []
-    if observations:
-        if observations.get("element_count") is not None:
-            obs_lines.append(f"Observed element count: {observations['element_count']}")
-        if observations.get("sample_texts"):
-            st = "; ".join([str(s) for s in observations["sample_texts"]])
-            obs_lines.append(f"Sample texts: {st}")
-        if observations.get("last_clicked_box") is not None:
-            obs_lines.append(f"Last clicked box: {observations['last_clicked_box']}")
-        if observations.get("last_action_ok") is not None:
-            obs_lines.append(f"Last action ok: {observations['last_action_ok']}")
-        if observations.get("last_action") is not None:
-            obs_lines.append(f"Last action: {observations['last_action']}")
-        if observations.get("last_params") is not None:
-            obs_lines.append(f"Last params: {observations['last_params']}")
-        if observations.get("last_result") is not None:
-            obs_lines.append(f"Last result: {observations['last_result']}")
-        if observations.get("last_reason") is not None:
-            obs_lines.append(f"Last reason: {observations['last_reason']}")
-        if observations.get("last_click_repeats") is not None:
-            obs_lines.append(f"Last click repeats: {observations['last_click_repeats']}")
-        if observations.get("last_click_input_candidate") is not None:
-            obs_lines.append(f"Last click looked like input: {observations['last_click_input_candidate']}")
-    mem_lines: List[str] = []
-    if memory:
-        # include a compact KV list
-        for k, v in list(memory.items())[:10]:
-            mem_lines.append(f"{k}={v}")
-    observations_block = ("Observed state:\n" + "\n".join(obs_lines) + "\n\n") if obs_lines else ""
-    typing_block = ""
-    if ti_text is not None or ti_enter:
-        tb: List[str] = ["Typing intent:"]
-        if ti_text is not None:
-            tb.append(f"- text: {ti_text}")
-        if ti_enter:
-            tb.append("- then_press_enter: True")
-        typing_block = "\n".join(tb) + "\n\n"
-    memory_block = ("Working memory:\n" + "\n".join(mem_lines) + "\n\n") if mem_lines else ""
+    structured_obs = _build_structured_observation(element_map, max_items=70)
+    history_block = _format_history(history, limit=6)
+    memory_block = _format_memory(memory)
+    observation_block = _format_observations(observations)
+
     schema = (
-        "Return STRICT JSON with fields: action, params, and optional reason.\n"
-        "Allowed actions and params:\n"
-        "- click: {\"box_number\": int, \"button\": \"left|right\", \"clicks\": 1|2}\n"
-        "- double_click: {\"box_number\": int}\n"
-        "- right_click: {\"box_number\": int}\n"
-        "- move: {\"box_number\": int}\n"
-        "- type_text: {\"text\": string}\n"
-        "- key: {\"key\": string}  # e.g., 'enter','esc','tab','up','down','left','right','backspace','delete','home','end'\n"
-        "- hotkey: {\"keys\": [string,...]}  # e.g., ['ctrl','l']\n"
-        "- scroll: {\"amount\": int}  # positive=up, negative=down\n"
+        "Return STRICT JSON with keys: action, params, optional reason, optional plan.\n"
+        "Allowed actions:\n"
+        "- click_box: {\"box_id\": int}\n"
+        "- double_click_box: {\"box_id\": int}\n"
+        "- right_click_box: {\"box_id\": int}\n"
+        "- hover_box: {\"box_id\": int}\n"
+        "- type_text: {\"text\": string, \"submit\": bool (optional)}\n"
+        "- key: {\"key\": string}\n"
+        "- hotkey: {\"keys\": [string,...]}\n"
+        "- scroll: {\"amount\": int}\n"
         "- wait: {\"seconds\": float}\n"
-        "- minimize_active: {}  # Minimize current window\n"
-    "- remember: {\"key\": string, \"value\": string}  # Persist a small fact for future steps\n"
-    "- forget: {\"key\": string}  # Remove a key from memory\n"
-    "- done: {\"message\": string}\n"
+        "- remember: {\"key\": string, \"value\": string}\n"
+        "- forget: {\"key\": string}\n"
+        "- done: {\"message\": string}\n"
         "Rules:\n"
-        "1) CONTINUE FROM PREVIOUS STEP: Assume the last action has just occurred; choose the next logical action.\n"
-        "2) Prefer clicking/moving on provided box_number(s) from the catalog; pick the exact number.\n"
-        "3) Avoid repeating the exact same click on the same box_number in consecutive steps unless explicitly necessary.\n"
-        "4) If text input is needed, first click the input box, then use type_text on a subsequent step.\n"
-        "5) Only one action per step. Keep actions small and purposeful.\n"
-        "6) If the goal is fully satisfied, output action='done' with a concise message.\n"
-        "7) If last_action_ok=false, adjust the plan: choose a different element or approach rather than repeating the same failed action.\n"
-        "8) Before type_text, ensure focus is on the intended input (click it first if needed, based on the last action).\n"
-        "9) Use only box_number values that appear in the catalog above; do not invent numbers.\n"
-        "10) If 'Typing intent' is provided below, after focusing the input, use type_text with exactly that string (no quotes, no extra spaces).\n"
-        "11) If 'Typing intent' indicates enter, follow typing by pressing the 'enter' key in the next step.\n"
+        "1) Use the numbered boxes from the observation when referring to UI elements.\n"
+        "2) Click, double-click, right-click, or hover actions must specify a valid box_id.\n"
+        "3) Focus an input before type_text; keep click and typing as separate steps.\n"
+        "4) Choose a single, purposeful action per step; adapt if the previous action failed.\n"
+        "5) Mark the task complete with action='done' once the goal is achieved.\n"
+        "6) If text entry needs confirmation, set submit=true or plan a follow-up key press.\n"
     )
+
     instructions = (
-        f"Goal: {goal}\n\n"
-        f"Catalog of visible elements (use these box numbers):\n{catalog}\n\n"
-        f"Previous steps (for continuity):\n{recent}\n\n"
-        f"{observations_block}"
-        f"{small_hint}"
-        f"{typing_block}"
-        f"{memory_block}"
+        "You are a grounded computer interaction agent. Observe the annotated screenshot and decide the next GUI action.\n"
+        f"GOAL: {goal}\n\n"
+        "Observation (numbered boxes):\n"
+        f"{structured_obs}\n\n"
+        "State clues:\n"
+        f"{observation_block}\n\n"
+        "Recent trajectory:\n"
+        f"{history_block}\n\n"
+        "Working memory:\n"
+        f"{memory_block}\n\n"
         f"{schema}\n"
-        f"Respond with JSON only.\n"
+        "Respond with JSON only."
     )
     return instructions
 
@@ -455,52 +509,185 @@ def take_screenshot(path: str) -> str:
     return path
 
 
-def perceive() -> Tuple[str, str, Dict[int, Dict], Optional[str]]:
-    shot = "agent_shot.png"
-    take_screenshot(shot)
-    elements = detect_ui_elements(shot, min_area=200, min_width=20, min_height=20)
-    bbox_path, element_map = create_bbox_overlay(shot, elements)
-    crop_path, crop_bbox_path = _build_annotated_crop2x(shot, element_map)
-    return bbox_path, shot, element_map, crop_bbox_path or crop_path
+def perceive() -> Tuple[str, Optional[str], Dict[int, Dict]]:
+    shot_path = "agent_shot.png"
+    take_screenshot(shot_path)
+
+    try:
+        elements = detect_ui_elements(shot_path, min_area=200, min_width=20, min_height=20)
+    except Exception:
+        elements = []
+
+    try:
+        annotated_path, element_map = create_bbox_overlay(shot_path, elements)
+    except Exception:
+        annotated_path = None
+        # Fallback to minimal metadata if overlay creation fails
+        element_list = []
+        for idx, bbox in enumerate(elements, start=1):
+            x, y, w, h = bbox
+            element_list.append(
+                (
+                    idx,
+                    {
+                        "bbox": (x, y, w, h),
+                        "center": (x + w // 2, y + h // 2),
+                        "area": w * h,
+                        "text": "",
+                        "color": "unknown",
+                        "region": "unknown",
+                    },
+                )
+            )
+        element_map = {idx: meta for idx, meta in element_list}
+
+    return shot_path, annotated_path, element_map
+
+
+def find_and_click(client: OpenAI, model: str, description: str, screenshot_path: str, action_type: str, move_duration: float) -> Tuple[bool, str]:
+    """
+    Use the VLM to find an element by description and perform a click action.
+    """
+    try:
+        # Encode the screenshot
+        b64_image = _encode_image(screenshot_path, fmt="jpeg", quality=90, resize_width=1400)
+        
+        # Build the prompt for the VLM to find the coordinates
+        prompt = (
+            f"You are a coordinate finder. Based on the provided screenshot, identify the center coordinates (x, y) "
+            f"of the element best described as: \"{description}\".\n"
+            "Respond with STRICT JSON containing only 'x' and 'y' keys, like {\"x\": 123, \"y\": 456}.\n"
+            "If the element is not visible, respond with {\"error\": \"not found\"}."
+        )
+        
+        content: List[Dict[str, Any]] = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}}
+        ]
+        
+        # Call the model to get coordinates
+        coord_resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            temperature=0,
+            max_tokens=100,
+            response_format={"type": "json_object"},
+        )
+        
+        coord_data_raw = coord_resp.choices[0].message.content or "{}"
+        coord_data = json.loads(coord_data_raw)
+        
+        if "error" in coord_data or "x" not in coord_data or "y" not in coord_data:
+            return False, f"Element '{description}' not found by VLM."
+            
+        x, y = int(coord_data["x"]), int(coord_data["y"])
+
+        # Execute the click action at the found coordinates
+        if action_type == "move":
+            ok = mcp_move(x, y, duration=move_duration)
+            return ok, f"move to '{description}' -> {x},{y}"
+        
+        clicks = 1
+        button = "left"
+        if action_type == "double_click":
+            clicks = 2
+        elif action_type == "right_click":
+            button = "right"
+            
+        ok1 = mcp_move(x, y, duration=move_duration)
+        ok2 = mcp_click(button=button, clicks=clicks)
+        
+        return ok1 and ok2, f"{action_type} on '{description}' -> {x},{y}"
+
+    except Exception as e:
+        return False, f"Exception in find_and_click: {e}"
 
 
 # ------------- Action execution -------------
 
-def execute_action(action: str, params: Dict[str, Any], element_map: Dict[int, Dict], move_duration: float = 0.2) -> Tuple[bool, str]:
+def execute_action(
+    client: OpenAI,
+    model: str,
+    action: str,
+    params: Dict[str, Any],
+    screenshot_path: str,
+    element_map: Dict[int, Dict],
+    move_duration: float = 0.2,
+    working_memory: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str]:
     try:
         a = (action or "").lower().strip()
-        if a in ("click", "double_click", "right_click", "move"):
-            if "box_number" not in params:
-                return False, "Missing box_number"
-            bn = params.get("box_number")
-            if isinstance(bn, str) and bn.isdigit():
-                bn = int(bn)
-            if not isinstance(bn, int) or bn not in element_map:
-                return False, f"Invalid box_number: {bn}"
-            cx, cy = element_map[bn]["center"]
-            if a == "move":
-                ok = mcp_move(cx, cy, duration=move_duration)
-                return ok, f"move to {bn} -> {cx},{cy}"
-            clicks = 1
-            button = "left"
-            if a == "double_click":
-                clicks = 2
-            elif a == "right_click":
-                button = "right"
-            ok1 = mcp_move(cx, cy, duration=move_duration)
-            ok2 = mcp_click(button=button, clicks=clicks)
-            # Small delay after focusing click on likely input elements to ensure caret focus
+
+        if working_memory is None:
+            working_memory = {}
+
+        if a in ("click_box", "double_click_box", "right_click_box", "hover_box"):
             try:
-                if a == "click" and _is_input_candidate(element_map.get(bn, {})):
-                    time.sleep(0.25)
+                box_id = int(params.get("box_id"))
             except Exception:
-                pass
-            return ok1 and ok2, f"{a} on {bn} -> {cx},{cy}"
+                return False, "Missing or invalid 'box_id' for box-based action"
+
+            meta = element_map.get(box_id)
+            if not meta:
+                return False, f"Unknown box_id {box_id}"
+            x, y, w, h = meta.get("bbox", (0, 0, 0, 0))
+            cx, cy = meta.get("center", (x + w // 2, y + h // 2))
+
+            ok_move = mcp_move(int(cx), int(cy), duration=move_duration)
+            if a == "hover_box":
+                return ok_move, f"hover_box #{box_id} -> ({cx}, {cy})"
+
+            button = "left"
+            clicks = 1
+            if a == "double_click_box":
+                clicks = 2
+            elif a == "right_click_box":
+                button = "right"
+
+            ok_click = mcp_click(button=button, clicks=clicks)
+            return ok_move and ok_click, f"{a} #{box_id} -> ({cx}, {cy})"
+        
+        if a in ("click", "double_click", "right_click", "move"):
+            description = params.get("description")
+            if not description:
+                return False, "Missing 'description' for click action"
+            return find_and_click(client, model, description, screenshot_path, a, move_duration)
 
         if a == "type_text":
-            text = str(params.get("text", ""))
+            raw_text = params.get("text")
+            text = str(raw_text) if raw_text is not None else ""
+            if not text:
+                fallback = working_memory.get("goal_literal_text")
+                if fallback:
+                    text = str(fallback)
+            if not text:
+                return False, "type_text requires 'text'"
+
             ok = mcp_type(text)
-            return ok, f"type_text: {text!r}"
+            should_submit: Optional[bool]
+            submit_param = params.get("submit")
+            if isinstance(submit_param, bool):
+                should_submit = submit_param
+            elif isinstance(submit_param, str):
+                should_submit = submit_param.lower() in {"true", "1", "yes"}
+            else:
+                should_submit = None
+
+            extra = ""
+            if ok:
+                needs_enter = False
+                if should_submit is True:
+                    needs_enter = True
+                elif should_submit is False:
+                    needs_enter = False
+                elif working_memory.get("goal_requires_enter"):
+                    needs_enter = True
+                if needs_enter:
+                    enter_ok = mcp_key("enter")
+                    ok = ok and enter_ok
+                    extra = " + enter"
+                    working_memory["goal_requires_enter"] = False
+            return ok, f"type_text: {text!r}{extra}"
 
         if a == "key":
             key = str(params.get("key", ""))
@@ -525,7 +712,6 @@ def execute_action(action: str, params: Dict[str, Any], element_map: Dict[int, D
             return True, f"waited {sec}s"
 
         if a == "remember":
-            # Memory is applied by caller; here just acknowledge
             k = params.get("key"); v = params.get("value")
             return True, f"remember: {k}={v}"
 
@@ -534,7 +720,6 @@ def execute_action(action: str, params: Dict[str, Any], element_map: Dict[int, D
             return True, f"forget: {k}"
 
         if a == "minimize_active":
-            # Try Win+Down (twice often minimizes), fallback Alt+Space then 'n'
             ok = mcp_hotkey("win", "down")
             time.sleep(0.05)
             ok2 = mcp_hotkey("win", "down")
@@ -623,81 +808,100 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
     client = OpenAI(api_key=key)
 
     history: List[Dict[str, Any]] = []
-    last_clicked_box: Optional[int] = None
-    last_click_repeats: int = 0
     working_memory: Dict[str, Any] = {}
+
+    literal_text, literal_submit = _extract_typing_intent(goal)
+    if literal_text:
+        working_memory["goal_literal_text"] = literal_text
+    if literal_submit:
+        working_memory["goal_requires_enter"] = True
+    working_memory["goal_summary"] = _shorten_text(goal, 96)
+
     for step in range(1, max(1, max_steps) + 1):
-        bbox_path, shot_path, element_map, crop_path = perceive()
-        images: List[Tuple[str, str]] = [(f"image/{image_format}", _encode_image(bbox_path, fmt=image_format, quality=quality, resize_width=resize_width))]
-        if send_crop and crop_path and os.path.exists(crop_path):
-            images.append((f"image/{image_format}", _encode_image(crop_path, fmt=image_format, quality=quality, resize_width=resize_width)))
-        # Observations for continuity (score + start_clicked)
+        shot_path, annotated_path, element_map = perceive()
+
+        images: List[Tuple[str, str]] = [
+            (f"image/{image_format}", _encode_image(shot_path, fmt=image_format, quality=quality, resize_width=resize_width))
+        ]
+        if annotated_path:
+            images.append(("image/png", _encode_image(annotated_path, fmt="png", quality=quality, resize_width=resize_width)))
+
+        if send_crop and element_map:
+            try:
+                top_subset = _limit_for_prompt(element_map, max_items=10)
+                crop_map = {idx: element_map[idx] for idx in top_subset}
+                if crop_map:
+                    _, crop_bbox_path = _build_annotated_crop2x(shot_path, crop_map)
+                    if crop_bbox_path:
+                        images.append(("image/png", _encode_image(crop_bbox_path, fmt="png", quality=quality, resize_width=min(resize_width, 1400))))
+            except Exception:
+                pass
+
         derived = _derive_state(element_map)
-        derived["last_clicked_box"] = last_clicked_box
+        derived["structured_preview"] = _build_structured_observation(element_map, max_items=24)
         if history:
             derived["last_action_ok"] = bool(history[-1].get("ok"))
             derived["last_action"] = history[-1].get("action")
             derived["last_params"] = history[-1].get("params")
             derived["last_result"] = history[-1].get("result")
             derived["last_reason"] = history[-1].get("reason")
-        # Add repeat count and input-candidate hint for the last clicked element
-        derived["last_click_repeats"] = last_click_repeats if last_clicked_box is not None else 0
-        if last_clicked_box is not None and last_clicked_box in element_map:
-            derived["last_click_input_candidate"] = _is_input_candidate(element_map[last_clicked_box])
-        else:
-            derived["last_click_input_candidate"] = None
+            if history[-1].get("plan") is not None:
+                derived["last_plan"] = history[-1].get("plan")
 
-        # Ask model; retry within the step on parse/invalid actions
+        # Ask model
         data: Dict[str, Any] = {}
-        allowed_actions = {"click","double_click","right_click","move","type_text","key","hotkey","scroll","wait","minimize_active","remember","forget","done"}
-        for retry in range(3):
-            prompt = build_agent_prompt(goal, element_map, history, observations=derived, memory=working_memory)
-            data = call_model(client, model, prompt, images)
-            if verbose:
-                print(f"\nStep {step} retry {retry} model JSON:\n{json.dumps(data, indent=2)[:1200]}")
-            if "_error" in data:
-                history.append({"action": "error", "result": data.get("_error"), "ok": False})
-                time.sleep(0.3)
-                continue
-            a = (data.get("action") or "").lower().strip()
-            p = data.get("params") if isinstance(data.get("params"), dict) else {}
-            # Duplicate click guard
-            if a in ("click","double_click","right_click") and isinstance(p.get("box_number"), (int, str)):
-                bn = int(p["box_number"]) if isinstance(p["box_number"], str) and p["box_number"].isdigit() else p["box_number"]
-                # Allow one immediate repeat click for focusing inputs; block further repeats
-                if isinstance(bn, int) and last_clicked_box is not None and bn == last_clicked_box and last_click_repeats >= 1:
-                    history.append({"action": "info", "result": f"avoiding repeated clicks on same box {bn}; re-planning", "ok": False})
-                    time.sleep(0.2)
-                    continue
-            # If invalid or empty action, re-ask this step
-            if not a or a not in allowed_actions:
-                history.append({"action": "error", "result": f"invalid action '{a}'", "ok": False})
-                time.sleep(0.2)
-                continue
-            # Good to proceed
-            break
-        else:
-            # All retries failed → do not execute None; wait and re-observe next step
-            if verbose:
-                print("No valid action after retries; waiting 1.0s and re-observing.", file=sys.stderr)
-            time.sleep(1.0)
+        allowed_actions = {
+            "click_box",
+            "double_click_box",
+            "right_click_box",
+            "hover_box",
+            "click",
+            "double_click",
+            "right_click",
+            "move",
+            "type_text",
+            "key",
+            "hotkey",
+            "scroll",
+            "wait",
+            "minimize_active",
+            "remember",
+            "forget",
+            "done",
+        }
+        
+        prompt = build_agent_prompt(goal, element_map, history, observations=derived, memory=working_memory)
+        data = call_model(client, model, prompt, images, max_tokens=192)
+        
+        if verbose:
+            print(f"\nStep {step} model JSON:\n{json.dumps(data, indent=2)[:1200]}")
+        
+        if "_error" in data:
+            history.append({"action": "error", "result": data.get("_error"), "ok": False})
+            time.sleep(0.3)
+            continue
+            
+        a = (data.get("action") or "").lower().strip()
+        if not a or a not in allowed_actions:
+            history.append({"action": "error", "result": f"invalid action '{a}'", "ok": False})
+            time.sleep(0.2)
             continue
 
         # Execute the chosen action
         action = data.get("action") if isinstance(data, dict) else None
         params = data.get("params") if isinstance(data, dict) and isinstance(data.get("params"), dict) else {}
         reason = data.get("reason") if isinstance(data, dict) else None
-        ok, result = execute_action(action, params, element_map, move_duration=move_duration)
-        # Update last_clicked_box state
-        if (action or "").lower() in ("click","double_click","right_click") and isinstance(params.get("box_number"), (int, str)):
-            bn = int(params["box_number"]) if isinstance(params["box_number"], str) and params["box_number"].isdigit() else params["box_number"]
-            if isinstance(bn, int):
-                # Track repeat count
-                if last_clicked_box == bn:
-                    last_click_repeats += 1
-                else:
-                    last_click_repeats = 0
-                last_clicked_box = bn
+        ok, result = execute_action(
+            client,
+            model,
+            action,
+            params,
+            shot_path,
+            element_map,
+            move_duration=move_duration,
+            working_memory=working_memory,
+        )
+
         # Update working memory on remember/forget actions
         if (action or "").lower() == "remember" and isinstance(params.get("key"), str):
             k = params.get("key"); v = str(params.get("value", ""))
@@ -707,7 +911,17 @@ def run_agent(goal: str, api_key: Optional[str], model: str, max_steps: int, mov
             k = params.get("key")
             if k in working_memory:
                 working_memory.pop(k, None)
-        history.append({"step": step, "action": action, "params": params, "ok": ok, "result": result, "reason": reason})
+        history.append(
+            {
+                "step": step,
+                "action": action,
+                "params": params,
+                "ok": ok,
+                "result": result,
+                "reason": reason,
+                "plan": data.get("plan") if isinstance(data, dict) else None,
+            }
+        )
         if verbose:
             print(f"Executed: {action} -> {result} (ok={ok})")
         # If model says done or action was 'done', stop
